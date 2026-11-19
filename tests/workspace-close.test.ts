@@ -17,6 +17,7 @@ import {describe, expect, test} from 'bun:test';
 import {
   cmuxCloseRefusal,
   STOP_POLL_MS,
+  stopThenCloseSurface,
   stopThenCloseWorkspace,
 } from '../src/thread/workspace-close';
 
@@ -253,10 +254,29 @@ describe("cmux's close refusals (home-base-kwand.13)", () => {
       'close-workspace failed, and no Claude ran there, so nothing was stopped: ',
     );
     expect(failure?.reason).toContain(RUNNING);
+    // home-base-ruaep D2 (b): what cmux said, that --force is never passed,
+    // and the one remedy known to work; no inferred cause ("idle shell").
     expect(failure?.reason).toContain(
-      'cmux counts a tab in it as still running a command',
+      'cmux counts a tab in this workspace as running a command, so it refused to close the workspace. thread close never overrides cmux: it never passes --force (question Q191 asks whether it should). Close the workspace in cmux by hand',
     );
+    expect(failure?.reason).not.toContain('idle');
     expect(w.events.some((event) => event.startsWith('kill'))).toBe(false);
+  });
+
+  test('home-base-ruaep D2 (b): a one-tab close cmux refuses as running names the tab, not the workspace', async () => {
+    const w = fake({}, {});
+    const surfaceRunning =
+      'cmux close-surface --surface S --workspace W failed: Error: confirmation_required: Surface has a running process; retry with force=true';
+    const failure = await stopThenCloseSurface([], {
+      ...w.deps,
+      closeSurface: () => Promise.resolve(surfaceRunning),
+    });
+    expect(failure?.step).toBe('close-surface');
+    expect(failure?.reason).toContain(surfaceRunning);
+    expect(failure?.reason).toContain(
+      'cmux counts this tab as running a command, so it refused to close it. thread close never overrides cmux: it never passes --force (question Q191 asks whether it should). Close the tab in cmux by hand',
+    );
+    expect(failure?.reason).not.toContain('idle');
   });
 
   test('a refusal after the stop says the workspace is open with its Claude stopped', async () => {

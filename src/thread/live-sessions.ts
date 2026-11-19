@@ -52,6 +52,7 @@
  */
 
 import type {CmuxRunner} from './cmux';
+import type {RestoredTtys} from './cmux-session-file';
 import type {
   HookStore,
   LiveSurface,
@@ -60,6 +61,7 @@ import type {
   ScreenRead,
 } from './pane-join';
 import type {EnvLike} from './paths';
+import type {TtyProof} from './stale-tty';
 
 import {execFile} from 'node:child_process';
 import {homedir} from 'node:os';
@@ -79,6 +81,7 @@ import {
   SCREEN_CONCURRENCY,
   statusLineIdOf,
 } from './pane-join';
+import {ttyProofOf, ttyUnproven} from './stale-tty';
 
 /** Which source found a session live (the first one, when several did). */
 export type LiveSource = 'agents' | 'hookStore' | 'ps' | 'screen';
@@ -431,6 +434,14 @@ export function joinLiveSessions(input: {
   screens: ReadonlyMap<string, ScreenRead>;
   store: HookStore;
   surfaces: readonly LiveSurface[];
+  /**
+   * home-base-ruaep.1: which tabs' ttys cmux restored from before its
+   * restart and never saw re-reported. No process is placed on such a tab,
+   * as F22 does for a shared tty. Only `thread close` and `thread open
+   * --undo` pass it; absent, every reported tty is taken as the tab's own,
+   * as before, for every other caller.
+   */
+  ttyProof?: TtyProof;
 }): {
   bySessionId: Map<string, LiveSession>;
   /** home-base-kwand.24 R2: every named claude process and its placement. */
@@ -467,9 +478,18 @@ export function joinLiveSessions(input: {
       .filter(([, list]) => list.length > 1)
       .map(([tty]) => tty),
   );
+  // home-base-ruaep.1: a tty only a stale tab reports belongs to no tab: the
+  // tab's own terminal is another, which it never reported.
+  const staleTtys = new Set(
+    [...surfacesByTty.entries()]
+      .filter(([, list]) =>
+        list.some((surface) => ttyUnproven(input.ttyProof, surface)),
+      )
+      .map(([tty]) => tty),
+  );
   const surfaceOf = (proc: Proc): LiveSurface | null => {
     const tty = normalizeTty(proc.tty);
-    if (tty == null || sharedTtys.has(tty)) return null;
+    if (tty == null || sharedTtys.has(tty) || staleTtys.has(tty)) return null;
     return surfacesByTty.get(tty)?.[0] ?? null;
   };
 
@@ -600,12 +620,15 @@ export function joinLiveSessions(input: {
     if (surface == null) {
       const tty = normalizeTty(proc.tty);
       const shared = tty != null && sharedTtys.has(tty);
+      const stale = tty != null && !shared && staleTtys.has(tty);
       if (!pidsNamed.has(proc.pid)) {
         unplaced.push({
           detail: shared
             ? `a claude process on tty ${tty}, which ${surfacesByTty.get(tty)?.length ?? 2} cmux surfaces report, so which pane holds it is unknown (F22)`
-            : 'a claude process on no cmux surface, with no session id on its command line or in the hook store',
-          kind: shared ? 'pane' : 'process',
+            : stale
+              ? `a claude process on tty ${tty}, which only ${surfacesByTty.get(tty)?.[0]?.ref ?? 'a tab'} reports, and that tab shows it as the number cmux restored from before its restart, so which pane holds it is unknown`
+              : 'a claude process on no cmux surface, with no session id on its command line or in the hook store',
+          kind: shared || stale ? 'pane' : 'process',
           pid: proc.pid,
           surfaceId: null,
           surfaceRef: null,
@@ -682,6 +705,12 @@ export interface LiveSessionDeps {
   cmux: CmuxRunner;
   hookStorePath: string;
   ps: ProcessRunner;
+  /**
+   * home-base-ruaep.1: cmux's `-previous` layout, read after the tree so the
+   * join places no process on a stale tab. `thread close` sets it; absent,
+   * the join is as before.
+   */
+  restoredTtys?: () => RestoredTtys;
 }
 
 /** The real sources: cmux through ./cmux's runner, ps, the hook store, `claude agents --json`. */
@@ -779,6 +808,9 @@ export async function readLiveSessions(
       screens,
       store: store.value,
       surfaces: surfaces.value,
+      ...(deps.restoredTtys == null
+        ? {}
+        : {ttyProof: ttyProofOf(surfaces.value, deps.restoredTtys())}),
     }),
   };
 }

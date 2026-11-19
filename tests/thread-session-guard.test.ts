@@ -668,8 +668,8 @@ describe('fail closed: thread handoff and thread spawn need the guard registered
   test('no guard entry: thread spawn exits 3 with guardNotRegistered', async () => {
     const w = world();
     const refused = await spawnGate({cwd: w.repo, env: w.env});
-    expect(refused?.exitCode).toBe(3);
-    expect(refused?.lines.join('\n')).toContain(
+    expect(refused.kind === 'stop' && refused.exitCode).toBe(3);
+    expect(refused.kind === 'stop' ? refused.lines.join('\n') : '').toContain(
       'refused by the handoff gate: guardNotRegistered',
     );
   });
@@ -678,8 +678,9 @@ describe('fail closed: thread handoff and thread spawn need the guard registered
     const w = world();
     registerGuard(w.repo, PER_HANDLER);
     const refused = await spawnGate({cwd: w.repo, env: w.env});
-    expect(refused?.lines.join('\n')).not.toContain('guardNotRegistered');
-    expect(refused?.lines.join('\n')).toContain(
+    const text = refused.kind === 'stop' ? refused.lines.join('\n') : '';
+    expect(text).not.toContain('guardNotRegistered');
+    expect(text).toContain(
       'refused by the handoff gate: guardNotSeen: no guard pass at',
     );
   });

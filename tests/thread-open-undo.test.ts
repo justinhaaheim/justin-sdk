@@ -10,6 +10,7 @@
 
 import type {CloseLogLine} from '../src/thread/close';
 import type {CmuxCall} from '../src/thread/cmux';
+import type {RestoredTtys} from '../src/thread/cmux-session-file';
 import type {PidCommand, UndoDeps, UndoOptions} from '../src/thread/open-undo';
 import type {ActivityTimes} from '../src/thread/transcript-activity';
 
@@ -36,6 +37,8 @@ import {
   parseProcessList,
   scrolledBoxText,
 } from '../src/thread/pane-join';
+import {ttyProofOf} from '../src/thread/stale-tty';
+import {NO_RESTORED_TTYS} from './stale-tty-fixtures';
 
 const RUN_AT = '2026-10-18T12:00:00.000Z';
 const RUN_MS = Date.parse(RUN_AT);
@@ -105,6 +108,8 @@ const IDLE_SHELL = [
 
 interface Pane {
   id: string;
+  /** home-base-kwand.28: the tab's isPinned in cmux's session file (default false). */
+  pinnedTab?: boolean;
   ref: string;
   /** One screen per read; the last one repeats. null = cmux cannot read it. */
   screens: (string | null)[];
@@ -203,6 +208,8 @@ function world(input: {
   activity?: Record<string, ActivityTimes>;
   model: Model;
   options?: Partial<UndoOptions>;
+  /** home-base-ruaep.1: cmux's `-previous` layout; default lists no tab. */
+  previous?: RestoredTtys;
   procs?: Proc[];
   record: {
     sessions: number[];
@@ -391,6 +398,7 @@ function world(input: {
     Promise.resolve({kind: 'ok', stdout: psText()});
   // home-base-kwand.11: thread close --tab's live-session join, over the
   // same model (screens as the next read would see them, without reading).
+  const previous = input.previous ?? NO_RESTORED_TTYS;
   const readLive: UndoDeps['readLive'] = async () => {
     const tree = await run(['tree', '--json']);
     const raw =
@@ -418,6 +426,7 @@ function world(input: {
         ),
         store: {},
         surfaces: flattenTree(raw),
+        ttyProof: ttyProofOf(flattenTree(raw), previous),
       }),
     };
   };
@@ -460,6 +469,24 @@ function world(input: {
       ),
     readHookStore: () => ({ok: true, value: {}}),
     readLive,
+    // home-base-kwand.28: cmux's session file, every tab listed.
+    readLiveSessionFile: () => ({
+      ok: true,
+      value: {
+        windows: input.model.windows.map((window) => ({
+          tabManager: {
+            workspaces: window.workspaces.map((entry) => ({
+              panels: entry.panes.map((pane) => ({
+                id: pane.id,
+                isPinned: pane.pinnedTab === true,
+              })),
+              workspaceId: entry.id,
+            })),
+          },
+        })),
+      },
+    }),
+    readRestoredTtys: () => previous,
     resumeOf: (sessionId) => ({
       checkout: '/Users/x/Dev/repo-a',
       command: `cd '/Users/x/Dev/repo-a' && claude --resume ${sessionId}`,
@@ -1598,6 +1625,8 @@ function tabWorld(
     /** A third tab in the old workspace. */
     otherTab?: boolean;
     pinned?: boolean;
+    /** home-base-kwand.28: the run's tab is pinned in cmux's session file. */
+    pinnedTab?: boolean;
     procs?: Proc[];
     refuseCloseSurface?: string;
     tab?: Record<string, unknown>;
@@ -1616,6 +1645,7 @@ function tabWorld(
         ]),
     {
       id: surfId(5),
+      ...(input.pinnedTab == null ? {} : {pinnedTab: input.pinnedTab}),
       ref: 'surface:5',
       screens: input.newTab?.screens ?? [idleClaude(sid(5))],
       tty: input.newTab?.tty === undefined ? 'ttys05' : input.newTab.tty,
@@ -1896,10 +1926,13 @@ describe('home-base-kwand.11: --close-tabs closes the tabs --restore-failed open
       },
       why: 'no process at all runs on tty ttys05, which pane surface:5 reports',
     },
+    // home-base-kwand.28: was "a pinned workspace" (kwand.20 item 1). One
+    // tab of a pinned workspace now closes (see the test below); a pinned
+    // TAB is what cmux refuses, so that is the keep.
     {
-      name: 'a pinned workspace',
-      setup: {pinned: true},
-      why: 'pinned',
+      name: 'a pinned tab',
+      setup: {pinnedTab: true},
+      why: 'pinned tab: cmux refuses to close a pinned tab; unpin it in cmux',
     },
   ];
   for (const each of keptCases) {
@@ -1915,6 +1948,18 @@ describe('home-base-kwand.11: --close-tabs closes the tabs --restore-failed open
       expect(result.state?.notClosed).toEqual([]);
     });
   }
+
+  test('home-base-kwand.28: the tab closes in a PINNED workspace exactly as in an unpinned one', async () => {
+    const plain = tabWorld();
+    const plainResult = await undoOpen(plain.options, plain.deps);
+    const pinned = tabWorld({pinned: true});
+    const pinnedResult = await undoOpen(pinned.options, pinned.deps);
+    expect(anyClose(plain).length).toBeGreaterThan(0);
+    expect(kills(pinned)).toEqual(kills(plain));
+    expect(anyClose(pinned)).toEqual(anyClose(plain));
+    expect(pinnedResult.state?.tabs?.kept).toEqual([]);
+    expect(pinnedResult.exitCode).toBe(plainResult.exitCode);
+  });
 
   test('the recorded tab is now its workspace only tab: kept and named for closing by hand, never closed with the workspace', async () => {
     const w = tabWorld({oldTab: false});

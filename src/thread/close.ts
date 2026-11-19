@@ -72,6 +72,7 @@ import type {
   UnplacedClaude,
 } from './close-all-except';
 import type {CmuxRunner, CmuxTree} from './cmux';
+import type {RestoredTtys, SessionFileRead} from './cmux-session-file';
 import type {InputDraftWrite, WriteInputDraftInput} from './input-drafts';
 import type {LiveSessions} from './live-sessions';
 import type {
@@ -133,6 +134,10 @@ import {readCmuxTree, realCmuxRunner, surfacesOfWorkspace} from './cmux';
 import {
   cmuxSupportDir,
   LIVE_SESSION_FILE,
+  pinnedTabOf,
+  previousSessionFilePath,
+  readRestoredTtys,
+  readSessionFile,
   readTabSet,
 } from './cmux-session-file';
 import {findTranscript} from './facts';
@@ -154,6 +159,7 @@ import {
 } from './open-undo';
 import {
   defaultHookStorePath,
+  holdsNoProcess,
   normalizeTty,
   readHookStore,
   readScreen,
@@ -169,12 +175,14 @@ import {
   SESSION_LABEL,
   SID_LABEL_PREFIX,
 } from './session-bead';
+import {staleKeepOf, staleRefsOnTty, staleSharersWords} from './stale-tty';
 import {recordTabs, tabRecordDir} from './tab-record';
 import {extractTranscriptMessages} from './transcript-messages';
 import {
   cmuxCloseRefusal,
   PINNED_REASON,
   pinnedKeepWords,
+  pinnedTabKeepWords,
   realPidCommand,
   realSigterm,
   stopThenCloseSurface,
@@ -417,6 +425,18 @@ export interface CloseDeps {
   readHookStore: () => SourceRead<HookStore>;
   /** The live sessions (readLiveSessions), read only when --session is given. */
   readLive: () => Promise<LiveSessions>;
+  /**
+   * home-base-kwand.28: cmux's live session file, read for each tab closed
+   * alone (close-surface), to see whether that tab is pinned.
+   */
+  readLiveSessionFile: () => SessionFileRead;
+  /**
+   * home-base-ruaep.1: cmux's `-previous` layout (what it restored at its
+   * last launch), read with every gate pass and by the live join, so a tab
+   * still showing its tty from before the restart is kept and no process is
+   * placed on it.
+   */
+  readRestoredTtys: () => RestoredTtys;
   /**
    * `--all-except` (K9): the inbox's session facts, no age window. `live`
    * names the sessions whose ending is read (a Claude process runs them).
@@ -701,7 +721,7 @@ async function assess(
   target: Resolved,
   view: LiveView,
   hookPids: HookStorePids,
-  deps: Pick<CloseDeps, 'resumeOf' | 'run'>,
+  deps: Pick<CloseDeps, 'readLiveSessionFile' | 'resumeOf' | 'run'>,
   onlySurface: string | null = null,
   gateOptions: GateOptions = {},
 ): Promise<Assessment> {
@@ -730,13 +750,16 @@ async function assess(
   // home-base-kwand.13 fix 1: cmux refuses close-workspace on a pinned
   // workspace, so predict it here, before any Claude is stopped (a whole-
   // workspace close: no `onlySurface`, which includes --tab's only-tab D4
-  // path). home-base-kwand.20 item 1: one tab of several (`onlySurface`,
-  // close-surface) is kept too, since whether cmux refuses close-surface in
-  // a pinned workspace is not known. Not knowing is not "unpinned" (rule 7).
-  const pinned = pinnedKeepWords(
-    workspace.pinned,
-    onlySurface == null ? 'workspace' : 'tab',
-  );
+  // path). home-base-kwand.28: one tab of several (`onlySurface`,
+  // close-surface) is not kept for a pinned workspace: cmux's close-surface
+  // has no such check (cmux source, read 2026-11-19). It refuses a pinned
+  // TAB, read from cmux's live session file; unknown keeps (rule 7).
+  const pinned =
+    onlySurface == null
+      ? pinnedKeepWords(workspace.pinned)
+      : pinnedTabKeepWords(
+          pinnedTabOf(deps.readLiveSessionFile(), onlySurface),
+        );
   if (pinned != null) {
     kinds.unshift('pinned');
     reasons.unshift(pinned);
@@ -1010,8 +1033,28 @@ function resolveTab(
   const workspaces = live.workspacesBySessionId.get(key) ?? [];
   const [workspaceId] = workspaces;
   if (workspaceId == null) {
+    // home-base-ruaep.1: the join places no process on a tab whose tty is
+    // stale, so a session on one shows in no workspace; say which tab.
+    const onStale = view.procs
+      .filter(
+        (proc) =>
+          isSessionProc(proc) &&
+          (argvSessionId(proc.command) === key ||
+            hookPids.get(key)?.has(proc.pid) === true),
+      )
+      .flatMap((proc) => {
+        const tty = normalizeTty(proc.tty);
+        return view.surfaces.filter(
+          (surface) => tty != null && normalizeTty(surface.tty) === tty,
+        );
+      })
+      .map((surface) =>
+        staleKeepOf(view.ttyProof, view.surfaces, surface, surface.ref),
+      )
+      .find((held) => held != null);
     return unresolved(
-      'it runs outside any cmux workspace, so there is no tab to close',
+      onStale?.text ??
+        'it runs outside any cmux workspace, so there is no tab to close',
     );
   }
   if (workspaces.length > 1) {
@@ -1059,7 +1102,7 @@ function resolveTab(
   }
   if (onTty.length > 1) {
     return unresolved(
-      `${onTty.length} tabs report its terminal ${tty} (${onTty.map((each) => each.ref).join(', ')}), so which tab holds it cannot be told`,
+      `${onTty.length} tabs report its terminal ${tty} (${onTty.map((each) => each.ref).join(', ')}), so which tab holds it cannot be told${staleSharersWords(staleRefsOnTty(view.ttyProof, view.surfaces, tty, null), tty)}`,
     );
   }
   if ((surface.workspaceId ?? '').toUpperCase() !== workspaceId.toUpperCase()) {
@@ -1074,6 +1117,15 @@ function resolveTab(
       ids.kind === 'refused' ? ids.reason : 'its tab has no surface id',
     );
   }
+  // home-base-ruaep.1: the one tab reporting it may show it from before
+  // cmux restarted; then the process is not proven to be that tab's.
+  const staleHeld = staleKeepOf(
+    view.ttyProof,
+    view.surfaces,
+    surface,
+    surface.ref,
+  );
+  if (staleHeld != null) return unresolved(staleHeld.text);
   const placed = live.bySessionId.get(key)?.surfaceId ?? null;
   if (placed != null && placed.toUpperCase() !== surfaceId.toUpperCase()) {
     return unresolved(
@@ -1114,7 +1166,7 @@ async function assessTab(
   target: TabTarget,
   view: LiveView,
   hookPids: HookStorePids,
-  deps: Pick<CloseDeps, 'resumeOf' | 'run'>,
+  deps: Pick<CloseDeps, 'readLiveSessionFile' | 'resumeOf' | 'run'>,
   ownWorkspace: string | null,
 ): Promise<Assessment> {
   const surfaceIds = surfacesOfWorkspace(view.tree, target.workspaceId);
@@ -1170,7 +1222,22 @@ async function assessTab(
       const surface = view.surfaces.find(
         (candidate) => candidate.id?.toUpperCase() === other.toUpperCase(),
       );
+      // home-base-v8z8d.2.3: a browser or markdown tab holds no process, so
+      // it cannot show the session; its screen is not read (cmux refuses).
+      if (holdsNoProcess(surface)) continue;
       const ref = surface?.ref ?? other;
+      // home-base-ruaep.1: a stale tab beside the target keeps the target,
+      // in every close path; its screen is still read below.
+      const staleHeld =
+        surface == null
+          ? null
+          : staleKeepOf(
+              view.ttyProof,
+              view.surfaces,
+              surface,
+              `the other tab ${ref}`,
+            );
+      if (staleHeld != null) reasons.push(staleHeld.text);
       const screen = await readScreen(deps.run, ref);
       if (screen.kind === 'unreadable') {
         reasons.push(
@@ -1376,14 +1443,24 @@ function keptAsFields(entry: CloseKept): {label: string; value: string}[] {
       : KEEP_KIND_WORDS[kind];
   return [
     {label: 'Kept as', value: words},
-    ...(kinds.includes('sharedTty')
+    // home-base-ruaep.1: the stale tab is named under Why; closing it by
+    // hand also lets the tab that owns its number be checked next run.
+    ...(kinds.includes('staleTty')
       ? [
           {
             label: 'By hand',
-            value: `which tab owns the shared tty's processes cannot be told, so this tool will not close it. Look at the tab; if nothing there matters, close it with cmux close-workspace --workspace ${entry.workspaceId} --window ${entry.windowId}, which stops nothing first and writes no resume command`,
+            value:
+              "a tab here shows the terminal number cmux restored from before its restart (named under Why); cmux keeps a restored number until the tab's shell reports a new one, so what runs in that tab cannot be checked and this tool will not close it. Look at that tab; if nothing there matters, close it in cmux by hand",
           },
         ]
-      : []),
+      : kinds.includes('sharedTty')
+        ? [
+            {
+              label: 'By hand',
+              value: `which tab owns the shared tty's processes cannot be told, so this tool will not close it. Look at the tab; if nothing there matters, close it with cmux close-workspace --workspace ${entry.workspaceId} --window ${entry.windowId}, which stops nothing first and writes no resume command`,
+            },
+          ]
+        : []),
   ];
 }
 
@@ -3172,6 +3249,9 @@ export function closeDepsOf(
   const home = env.HOME != null && env.HOME !== '' ? env.HOME : homedir();
   const repoCache = new Map<string, RepoResolution>();
   const logPath = closesLogPath(env);
+  const readRestored =
+    deps.readRestoredTtys ??
+    (() => readRestoredTtys(previousSessionFilePath(env, home)));
   return {
     appendLog: deps.appendLog ?? realAppendLog(logPath),
     commandOf: deps.commandOf ?? realPidCommand,
@@ -3185,7 +3265,15 @@ export function closeDepsOf(
       deps.readHookStore ?? (() => readHookStore(defaultHookStorePath(home))),
     readLive:
       deps.readLive ??
-      (async () => await readLiveSessions(realLiveSessionDeps(cmuxEnv))),
+      (async () =>
+        await readLiveSessions({
+          ...realLiveSessionDeps(cmuxEnv),
+          restoredTtys: readRestored,
+        })),
+    readLiveSessionFile:
+      deps.readLiveSessionFile ??
+      (() => readSessionFile(join(cmuxSupportDir(env), LIVE_SESSION_FILE))),
+    readRestoredTtys: readRestored,
     readSessionFacts:
       deps.readSessionFacts ??
       (async (live, only) =>

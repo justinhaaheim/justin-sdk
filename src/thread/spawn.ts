@@ -112,7 +112,7 @@ import {
 import {realHandoffNumberReaders} from './session-handoff';
 import {NO_MARKS, sessionName} from './session-name';
 import {sessionIdFrom} from './session-select';
-import {spawnGate} from './spawn-gate';
+import {spawnGate, spawnUsageUnknownValue} from './spawn-gate';
 import {checkKickoffHolders, holdersRefusalLines} from './spawn-holders';
 import {describeNewWorkspaceRecord, recordNewWorkspace} from './workspace-name';
 
@@ -155,7 +155,10 @@ export interface SpawnOptions {
 export interface SpawnDeps {
   /** The screen check's clock, in ms (home-base-edf4y D1, as the handoff's). */
   clock: () => number;
-  /** The handoff gate (home-base-mbnjv.2, C4): null = go on. */
+  /**
+   * The handoff gate (home-base-mbnjv.2, C4): `go` goes on, naming any unknown
+   * usage reading it let through (home-base-kj353); `stop` is returned as is.
+   */
   gate: typeof spawnGate;
   /** The already-held check (home-base-5uu56.2.4), behind its knob. */
   holders: typeof checkKickoffHolders;
@@ -759,14 +762,29 @@ export async function spawnSession(
   }
 
   // ---- 1b. the handoff gate, knob on only (home-base-mbnjv.2, C4) ----
-  const refused = await (deps.gate ?? spawnGate)({cwd, env});
-  if (refused != null) return refused;
+  const gated = await (deps.gate ?? spawnGate)({cwd, env});
+  if (gated.kind === 'stop') {
+    return {exitCode: gated.exitCode, lines: gated.lines};
+  }
+  // home-base-kj353: an unknown usage reading the gate let through is named
+  // on every outcome from here on, not only on "Opened".
+  const usageValue =
+    gated.usageUnknown == null
+      ? null
+      : spawnUsageUnknownValue(gated.usageUnknown);
+  if (usageValue != null) fields.push({label: 'Usage', value: usageValue});
+  const withUsage = (result: SpawnResult): SpawnResult =>
+    usageValue == null
+      ? result
+      : {...result, lines: [...result.lines, '', `Usage: ${usageValue}`]};
 
   // ---- 2. cmux: the socket, then a ping (respawn.ts rules) ----
   if ('reason' in socket) {
-    return stop(
-      2,
-      `cmux cannot be found: no CMUX_SOCKET_PATH, and ${socket.reason}`,
+    return withUsage(
+      stop(
+        2,
+        `cmux cannot be found: no CMUX_SOCKET_PATH, and ${socket.reason}`,
+      ),
     );
   }
   const cmuxEnv = {...env, CMUX_QUIET: '1', CMUX_SOCKET_PATH: socket.path};
@@ -775,7 +793,9 @@ export async function spawnSession(
   if (ping.kind === 'failed') {
     const allow = socketSettingsJson(socket.path).trim();
     const hint = `If this session is sandboxed, the sandbox blocks the cmux socket: add ${allow} to your Claude Code user settings, or retry with the sandbox disabled.`;
-    return stop(2, `cmux cannot be reached: ${ping.reason}\n${hint}`);
+    return withUsage(
+      stop(2, `cmux cannot be reached: ${ping.reason}\n${hint}`),
+    );
   }
 
   // ---- 2b. the kickoff file (home-base-8vywn): only now, after the ping,
@@ -783,9 +803,11 @@ export async function spawnSession(
   if (kickoffPlan != null) {
     const failed = writeKickoffFile(kickoffPlan.path, kickoffPlan.text);
     if (failed != null) {
-      return stop(
-        2,
-        `the kickoff file ${kickoffPlan.path} could not be written, so the session would start without its kickoff: ${failed}. Nothing was opened.`,
+      return withUsage(
+        stop(
+          2,
+          `the kickoff file ${kickoffPlan.path} could not be written, so the session would start without its kickoff: ${failed}. Nothing was opened.`,
+        ),
       );
     }
   }
@@ -799,7 +821,7 @@ export async function spawnSession(
       made.kind === 'failed'
         ? made.reason
         : `cmux printed ${JSON.stringify(stdout)}`;
-    return stop(1, `cmux did not confirm a new workspace: ${cmux}`);
+    return withUsage(stop(1, `cmux did not confirm a new workspace: ${cmux}`));
   }
   fields.splice(1, 0, {label: 'Workspace id', value: ref});
   // home-base-ys9t7.9.1 B3: the name is the tool's, so the new session's
@@ -838,7 +860,9 @@ export async function spawnSession(
     workspace: workspaceId ?? ref,
   });
   if (screen.kind !== 'started') {
-    return notConfirmed({name: workspaceName, ref, screen, workspaceId});
+    return withUsage(
+      notConfirmed({name: workspaceName, ref, screen, workspaceId}),
+    );
   }
   fields.push({
     label: 'Claude',

@@ -10,6 +10,7 @@
 
 import type {CloseDeps, CloseLogLine, CloseOptions} from '../src/thread/close';
 import type {CmuxCall} from '../src/thread/cmux';
+import type {RestoredTtys} from '../src/thread/cmux-session-file';
 import type {HookStore, RawTree} from '../src/thread/pane-join';
 import type {PidCommand} from '../src/thread/workspace-close';
 
@@ -34,6 +35,13 @@ import {
   NO_BREAK_SPACE,
   parseProcessList,
 } from '../src/thread/pane-join';
+import {ttyProofOf} from '../src/thread/stale-tty';
+import {
+  FAKE_PREVIOUS_FILE,
+  NO_RESTORED_TTYS,
+  restoredTtys,
+  UNREADABLE_PREVIOUS,
+} from './stale-tty-fixtures';
 
 const CLAUDE = '/Users/jhaa/.local/bin/claude';
 
@@ -202,6 +210,11 @@ function world(input: {
   /** Sessions with no transcript (resume command unknown). */
   noTranscript?: string[];
   options?: Partial<CloseOptions>;
+  /**
+   * home-base-ruaep.1: cmux's `-previous` layout. Default: read, listing no
+   * tab, so no tab is stale and the real file is never read.
+   */
+  previous?: RestoredTtys;
   procs?: Proc[];
   /**
    * home-base-kwand.13: workspace id → the error cmux gives its
@@ -349,6 +362,7 @@ function world(input: {
   };
 
   const hookStore = input.hookStore === undefined ? {} : input.hookStore;
+  const previous = input.previous ?? NO_RESTORED_TTYS;
   const deps: Partial<CloseDeps> = {
     appendLog: (line) => {
       events.push(`log ${line.workspaceId} ${line.outcome.split(':')[0]}`);
@@ -392,8 +406,10 @@ function world(input: {
           ),
           store: hookStore ?? {},
           surfaces: flattenTree(rawTree()),
+          ttyProof: ttyProofOf(flattenTree(rawTree()), previous),
         }),
       }),
+    readRestoredTtys: () => previous,
     resumeOf: (sessionId) =>
       (input.noTranscript ?? []).includes(sessionId)
         ? {kind: 'unknown', reason: `no transcript ${sessionId}.jsonl`}
@@ -1131,8 +1147,9 @@ describe('cmux refusals (home-base-kwand.13)', () => {
     expect(result.output).toContain(
       `Resume:     cd '/Users/x/Dev/repo-a' && claude --resume ${sid(1)}`,
     );
+    // home-base-ruaep D2 (b): known facts only, no inferred cause.
     expect(result.output).toContain(
-      'cmux counts a tab in it as still running a command',
+      'cmux counts a tab in this workspace as running a command, so it refused to close the workspace. thread close never overrides cmux: it never passes --force (question Q191 asks whether it should). Close the workspace in cmux by hand',
     );
     expect(result.output).toContain(
       'cmux refuses to close a pinned workspace; unpin it in cmux first',
@@ -1253,5 +1270,138 @@ describe('home-base-kwand.20: unseen panes and a SIGTERM wait that timed out', (
     expect(result.output).toContain(
       '1 of the failed had their Claude stopped and are still open',
     );
+  });
+});
+
+describe('home-base-ruaep.1: a tab still showing its tty from before the cmux restart', () => {
+  const shells: Proc[] = [
+    {
+      command: 'login -pflq jhaa /bin/zsh',
+      onTerm: 'exit',
+      pid: 2001,
+      tty: 'ttys01',
+    },
+    {command: '-zsh', onTerm: 'exit', pid: 2002, tty: 'ttys01'},
+  ];
+  const cmuxCloses = (w: World): (readonly string[])[] =>
+    w.calls.filter((args) => args[0]?.startsWith('close-') === true);
+
+  test('named close: a stale tab no other tab reports is kept as staleTty; nothing is signalled or closed', async () => {
+    const w = world({
+      model: oneWindow([{n: 1, screens: [IDLE_SHELL]}]),
+      options: {workspaces: [wsId(1)]},
+      previous: restoredTtys({[surfId(1)]: 'ttys01'}),
+      procs: shells,
+    });
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.exitCode).toBe(0);
+    expect(result.state?.closed).toEqual([]);
+    expect(result.state?.kept[0]?.reasonKinds).toEqual(['staleTty']);
+    expect(result.state?.kept[0]?.reasons[0]).toBe(
+      "pane surface:1 shows terminal ttys01, the number it had before cmux restarted at 2026-11-17 21:36; cmux keeps a restored number until the tab's shell reports a new one, so whether ttys01 is still this tab's terminal cannot be told, and what runs in it cannot be checked. Close it in cmux by hand if nothing there matters",
+    );
+    expect(result.output).toContain('Close it in cmux by hand');
+    expect(kills(w)).toEqual([]);
+    expect(cmuxCloses(w)).toEqual([]);
+  });
+
+  test('named close: a Claude on a stale tab is not taken for its own (no pid), and is not signalled', async () => {
+    const w = world({
+      model: oneWindow([{n: 1, screens: [idleClaude(sid(1))]}]),
+      options: {workspaces: [wsId(1)]},
+      previous: restoredTtys({[surfId(1)]: 'ttys01'}),
+      procs: [claudeProc(1)],
+    });
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.state?.kept[0]?.reasonKinds).toEqual(['staleTty']);
+    expect(result.state?.kept[0]?.pid).toBeNull();
+    expect(kills(w)).toEqual([]);
+    expect(cmuxCloses(w)).toEqual([]);
+  });
+
+  test('named close: a tab re-reported since launch (another tty in -previous) closes as today', async () => {
+    const w = world({
+      model: oneWindow([{n: 1, screens: [IDLE_SHELL]}]),
+      options: {workspaces: [wsId(1)]},
+      previous: restoredTtys({[surfId(1)]: 'ttys077'}),
+      procs: shells,
+    });
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.state?.kept).toEqual([]);
+    expect(result.state?.closed.map((entry) => entry.workspaceId)).toEqual([
+      wsId(1),
+    ]);
+  });
+
+  test('named close: a tab not in -previous closes as today', async () => {
+    const w = world({
+      model: oneWindow([{n: 1, screens: [IDLE_SHELL]}]),
+      options: {workspaces: [wsId(1)]},
+      previous: restoredTtys({[surfId(9)]: 'ttys01'}),
+      procs: shells,
+    });
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.state?.kept).toEqual([]);
+    expect(result.state?.closed.map((entry) => entry.workspaceId)).toEqual([
+      wsId(1),
+    ]);
+  });
+
+  test('named close: -previous unreadable keeps the tab as unknown, naming the file and the error', async () => {
+    const w = world({
+      model: oneWindow([{n: 1, screens: [IDLE_SHELL]}]),
+      options: {workspaces: [wsId(1)]},
+      previous: UNREADABLE_PREVIOUS,
+      procs: shells,
+    });
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.state?.closed).toEqual([]);
+    expect(result.state?.kept[0]?.reasonKinds).toEqual(['unknown']);
+    expect(result.state?.kept[0]?.reasons[0]).toContain(FAKE_PREVIOUS_FILE);
+    expect(result.state?.kept[0]?.reasons[0]).toContain('Unexpected EOF');
+    expect(kills(w)).toEqual([]);
+    expect(cmuxCloses(w)).toEqual([]);
+  });
+
+  test('a shared pair: the stale tab names the owner, and the owner names the stale tab', async () => {
+    const w = world({
+      model: oneWindow([
+        {n: 1, screens: [IDLE_SHELL], tty: 'ttys02'},
+        {n: 2, screens: [IDLE_SHELL]},
+      ]),
+      options: {dryRun: true, workspaces: [wsId(1), wsId(2)]},
+      previous: restoredTtys({[surfId(1)]: 'ttys02'}),
+      procs: shells.map((proc) => ({...proc, tty: 'ttys02'})),
+    });
+    const result = await closeWorkspaces(w.options, w.deps);
+    const kept = new Map(
+      (result.state?.kept ?? []).map((entry) => [entry.workspaceId, entry]),
+    );
+    expect(kept.get(wsId(1))?.reasonKinds).toEqual(['staleTty']);
+    expect(kept.get(wsId(1))?.reasons[0]).toContain(
+      'surface:2 reports ttys02 too, a number it reported since the restart; closing pane surface:1 by hand lets surface:2 be checked',
+    );
+    expect(kept.get(wsId(2))?.reasonKinds).toEqual(['sharedTty']);
+    expect(kept.get(wsId(2))?.reasons[0]).toContain(
+      'surface:1 shows ttys02 as the number cmux restored from before its restart, so whether it is still that tab’s terminal cannot be told; close it in cmux by hand and this tab can be checked',
+    );
+  });
+
+  test('AC 3, --session: two tabs report the Claude’s tty, one stale; no signal and no close reach either', async () => {
+    const w = world({
+      model: oneWindow([
+        // The worst case: only the stale tab's screen shows the session, so
+        // --session targets the stale tab's workspace.
+        {n: 1, screens: [idleClaude(sid(2))], tty: 'ttys02'},
+        {n: 2, screens: [IDLE_SHELL]},
+      ]),
+      options: {sessions: [sid(2)]},
+      previous: restoredTtys({[surfId(1)]: 'ttys02'}),
+      procs: [claudeProc(2)],
+    });
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.state?.closed ?? []).toEqual([]);
+    expect(kills(w)).toEqual([]);
+    expect(cmuxCloses(w)).toEqual([]);
   });
 });

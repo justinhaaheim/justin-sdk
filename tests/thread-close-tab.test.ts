@@ -9,6 +9,7 @@
 
 import type {CloseDeps, CloseLogLine, CloseOptions} from '../src/thread/close';
 import type {CmuxCall} from '../src/thread/cmux';
+import type {RestoredTtys} from '../src/thread/cmux-session-file';
 import type {HookStore, RawTree} from '../src/thread/pane-join';
 import type {PidCommand} from '../src/thread/workspace-close';
 
@@ -37,6 +38,8 @@ import {
   NO_BREAK_SPACE,
   parseProcessList,
 } from '../src/thread/pane-join';
+import {ttyProofOf} from '../src/thread/stale-tty';
+import {NO_RESTORED_TTYS, restoredTtys} from './stale-tty-fixtures';
 
 const CLAUDE = '/Users/jhaa/.local/bin/claude';
 
@@ -86,10 +89,23 @@ function workingClaude(session: string): string {
 
 interface Pane {
   id: string;
+  /**
+   * home-base-kwand.28: the tab's `isPinned` in cmux's session file;
+   * undefined is false, null leaves the key out, 'unlisted' leaves the
+   * whole panel out of the file.
+   */
+  pinnedTab?: boolean | null | 'unlisted';
+  /** What a failed read-screen says (default "surface not ready"). */
+  readError?: string;
   ref: string;
   /** One screen per read; the last one repeats. null = cmux cannot read it. */
   screens: (string | null)[];
   tty: string | null;
+  /**
+   * cmux tree's surface `type` (home-base-v8z8d.2.3): undefined is
+   * 'terminal'; null leaves the key out of the tree.
+   */
+  type?: string | null;
 }
 
 interface Workspace {
@@ -116,13 +132,20 @@ interface Proc {
 function tab(
   n: number,
   screens: (string | null)[],
-  more: {id?: string; tty?: string | null} = {},
+  more: {
+    id?: string;
+    readError?: string;
+    tty?: string | null;
+    type?: string | null;
+  } = {},
 ): Pane {
   return {
     id: more.id ?? surfId(n),
+    ...(more.readError == null ? {} : {readError: more.readError}),
     ref: `surface:${n}`,
     screens,
     tty: more.tty === undefined ? `ttys0${n}` : more.tty,
+    ...(more.type === undefined ? {} : {type: more.type}),
   };
 }
 
@@ -198,7 +221,11 @@ function world(input: {
   hookStore?: HookStore;
   model: Model;
   options?: Partial<CloseOptions>;
+  /** home-base-ruaep.1: cmux's `-previous` layout; default lists no tab. */
+  previous?: RestoredTtys;
   procs: Proc[];
+  /** home-base-kwand.28: cmux's session file cannot be read. */
+  sessionFileUnreadable?: boolean;
 }): World {
   const root = mkdtempSync(join(tmpdir(), 'thread-close-tab-'));
   dirs.push(root);
@@ -236,7 +263,7 @@ function world(input: {
               ref: pane.ref,
               title: 'x',
               tty: pane.tty,
-              type: 'terminal',
+              ...(pane.type === null ? {} : {type: pane.type ?? 'terminal'}),
             },
           ],
         })),
@@ -266,7 +293,11 @@ function world(input: {
         events.push(`read ${target}`);
         const screen = pane == null ? null : screenOf(pane, false);
         return screen == null
-          ? {kind: 'failed', reason: 'surface not ready', timedOut: false}
+          ? {
+              kind: 'failed',
+              reason: pane?.readError ?? 'surface not ready',
+              timedOut: false,
+            }
           : {kind: 'ok', stdout: screen};
       }
       if (args[0] === 'close-workspace') {
@@ -317,6 +348,7 @@ function world(input: {
   };
 
   const hookStore = input.hookStore ?? {};
+  const previous = input.previous ?? NO_RESTORED_TTYS;
   const deps: Partial<CloseDeps> = {
     appendLog: (line) => {
       events.push(
@@ -356,8 +388,33 @@ function world(input: {
           ),
           store: hookStore,
           surfaces: flattenTree(rawTree()),
+          ttyProof: ttyProofOf(flattenTree(rawTree()), previous),
         }),
       }),
+    readLiveSessionFile: () =>
+      input.sessionFileUnreadable === true
+        ? {ok: false, reason: 'no cmux session file at /fake/session.json'}
+        : {
+            ok: true,
+            value: {
+              windows: input.model.windows.map((window) => ({
+                tabManager: {
+                  workspaces: window.workspaces.map((entry) => ({
+                    panels: entry.panes
+                      .filter((pane) => pane.pinnedTab !== 'unlisted')
+                      .map((pane) => ({
+                        id: pane.id,
+                        ...(pane.pinnedTab === null
+                          ? {}
+                          : {isPinned: pane.pinnedTab === true}),
+                      })),
+                    workspaceId: entry.id,
+                  })),
+                },
+              })),
+            },
+          },
+    readRestoredTtys: () => previous,
     resumeOf: (sessionId) => ({
       checkout: '/Users/x/Dev/repo-a',
       command: `cd '/Users/x/Dev/repo-a' && claude --resume ${sessionId}`,
@@ -1012,8 +1069,11 @@ describe('home-base-kwand.30: --tab counts a tab closed only once the cmux tree 
   });
 });
 
-describe('home-base-kwand.20 item 1: a tab of a pinned workspace', () => {
-  test('one tab of several (close-surface) in a PINNED workspace is kept ("pinned"), and its Claude is never signalled: whether cmux refuses close-surface there is not known', async () => {
+describe('home-base-kwand.28: one tab of a pinned workspace closes; a pinned tab is kept', () => {
+  // Inverts home-base-kwand.20 item 1's test "one tab of several in a PINNED
+  // workspace is kept": cmux's close-surface has no pinned-workspace check
+  // (cmux v0.65.2.2 source, read 2026-11-19), so that keep is dropped.
+  test('one tab of several (close-surface) in a PINNED workspace closes like any other', async () => {
     const pair = handoffPair();
     const pinned = pair.model.windows[0]?.workspaces[0];
     if (pinned == null) throw new Error('no workspace 1');
@@ -1021,9 +1081,238 @@ describe('home-base-kwand.20 item 1: a tab of a pinned workspace', () => {
     const w = world({...pair, options: {sessions: [sid(1)]}});
     const result = await closeWorkspaces(w.options, w.deps);
     expect(result.exitCode).toBe(0);
+    expect(result.state?.kept).toEqual([]);
+    expect(writes(w)).toEqual([
+      `log ${surfId(1)} closing`,
+      'kill 1001',
+      `close-surface --surface ${surfId(1)} --workspace ${wsId(1)}`,
+      `log ${surfId(1)} closed`,
+    ]);
+  });
+
+  test('a PINNED TAB is kept with a plain reason, and its Claude is never signalled', async () => {
+    const pair = handoffPair();
+    const first = pair.model.windows[0]?.workspaces[0]?.panes[0];
+    if (first == null) throw new Error('no tab 1');
+    first.pinnedTab = true;
+    const w = world({...pair, options: {sessions: [sid(1)]}});
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.exitCode).toBe(0);
+    expect(writes(w)).toEqual([]);
+    expect(result.state?.kept[0]?.reasons).toEqual([
+      'pinned tab: cmux refuses to close a pinned tab; unpin it in cmux',
+    ]);
+  });
+
+  const unknownCases: {
+    name: string;
+    pinnedTab: Pane['pinnedTab'];
+    reason: string;
+    unreadable?: boolean;
+  }[] = [
+    {
+      name: 'cmux’s session file cannot be read',
+      pinnedTab: false,
+      reason: 'no cmux session file at /fake/session.json',
+      unreadable: true,
+    },
+    {
+      name: 'the file does not list the tab',
+      pinnedTab: 'unlisted',
+      reason: "cmux's session file does not list it",
+    },
+    {
+      name: 'the file does not say whether it is pinned',
+      pinnedTab: null,
+      reason: "cmux's session file does not say whether it is pinned",
+    },
+  ];
+  for (const each of unknownCases) {
+    test(`unknown keeps the tab (rule 7): ${each.name}`, async () => {
+      const pair = handoffPair();
+      const first = pair.model.windows[0]?.workspaces[0]?.panes[0];
+      if (first == null) throw new Error('no tab 1');
+      first.pinnedTab = each.pinnedTab;
+      const w = world({
+        ...pair,
+        options: {sessions: [sid(1)]},
+        ...(each.unreadable === true ? {sessionFileUnreadable: true} : {}),
+      });
+      const result = await closeWorkspaces(w.options, w.deps);
+      expect(result.exitCode).toBe(0);
+      expect(writes(w)).toEqual([]);
+      expect(result.state?.kept[0]?.reasons).toEqual([
+        `pinned?: whether this tab is pinned is not known (${each.reason}), and cmux refuses to close a pinned tab`,
+      ]);
+    });
+  }
+
+  test('the only tab of a pinned workspace (close-workspace) is still kept for the pinned workspace, whatever the file says of the tab', async () => {
+    const w = world({
+      hookStore: hookStoreOf([[sid(1), 1001]]),
+      model: windowOf([{n: 1, tabs: [tab(1, [idleClaude(sid(1))])]}]),
+      options: {sessions: [sid(1)]},
+      procs: [claudeProc(1)],
+    });
+    const only = w.model.windows[0]?.workspaces[0];
+    if (only == null) throw new Error('no workspace 1');
+    only.pinned = true;
+    const result = await closeWorkspaces(w.options, w.deps);
     expect(writes(w)).toEqual([]);
     expect(result.state?.kept[0]?.reasons[0]).toStartWith(
-      'pinned: its workspace is pinned, and whether cmux refuses to close a tab',
+      'pinned: cmux refuses to close a pinned workspace',
     );
+  });
+});
+
+describe('home-base-v8z8d.2.3: the other tab is not a terminal', () => {
+  const NOT_A_TERMINAL = 'Error: invalid_params: Surface is not a terminal';
+
+  /** sid(1) in tab 1, beside tab 2, whose screen cmux cannot read. */
+  function besideUnreadable(more: {
+    readError: string;
+    tty?: string | null;
+    type?: string | null;
+  }): {hookStore: HookStore; model: Model; procs: Proc[]} {
+    return {
+      hookStore: hookStoreOf([[sid(1), 1001]]),
+      model: windowOf([
+        {n: 1, tabs: [tab(1, [idleClaude(sid(1))]), tab(2, [null], more)]},
+      ]),
+      procs: [claudeProc(1)],
+    };
+  }
+
+  for (const type of ['markdown', 'browser']) {
+    test(`a ${type} tab beside it is not read, and the tab closes (the ${type} tab stays)`, async () => {
+      const w = world({
+        ...besideUnreadable({readError: NOT_A_TERMINAL, tty: null, type}),
+        options: {sessions: [sid(1)]},
+      });
+      const result = await closeWorkspaces(w.options, w.deps);
+      expect(result.exitCode).toBe(0);
+      expect(w.events).not.toContain('read surface:2');
+      expect(result.state?.kept).toEqual([]);
+      expect(writes(w)).toEqual([
+        `log ${surfId(1)} closing`,
+        'kill 1001',
+        `close-surface --surface ${surfId(1)} --workspace ${wsId(1)}`,
+        `log ${surfId(1)} closed`,
+      ]);
+      expect(
+        w.model.windows[0]?.workspaces[0]?.panes.map((p) => p.ref),
+      ).toEqual(['surface:2']);
+    });
+  }
+
+  test('a terminal tab beside it whose read fails with internal_error keeps it, whatever the error says', async () => {
+    const w = world({
+      ...besideUnreadable({
+        readError: 'Error: internal_error: Failed to read screen',
+      }),
+      options: {sessions: [sid(1)]},
+    });
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.exitCode).toBe(0);
+    expect(writes(w)).toEqual([]);
+    expect(result.state?.kept.map((entry) => entry.reasons)).toEqual([
+      [
+        `the screen of the other tab surface:2 could not be read (Error: internal_error: Failed to read screen), so that it does not show session ${sid(1)} too cannot be proven`,
+      ],
+    ]);
+  });
+
+  test('a tab the tree gives no type, whose read fails, keeps it: no type is a terminal (rule 7)', async () => {
+    const w = world({
+      ...besideUnreadable({readError: NOT_A_TERMINAL, tty: null, type: null}),
+      options: {sessions: [sid(1)]},
+    });
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.exitCode).toBe(0);
+    expect(writes(w)).toEqual([]);
+    expect(w.events).toContain('read surface:2');
+    expect(result.state?.kept[0]?.reasons).toEqual([
+      `the screen of the other tab surface:2 could not be read (${NOT_A_TERMINAL}), so that it does not show session ${sid(1)} too cannot be proven`,
+    ]);
+  });
+
+  test('an agentSession tab (cmux runs claude -p in it, with no terminal) is still read, and keeps it', async () => {
+    const w = world({
+      ...besideUnreadable({
+        readError: NOT_A_TERMINAL,
+        tty: null,
+        type: 'agentSession',
+      }),
+      options: {sessions: [sid(1)]},
+    });
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.exitCode).toBe(0);
+    expect(writes(w)).toEqual([]);
+    expect(w.events).toContain('read surface:2');
+    expect(result.state?.kept[0]?.reasons[0]).toStartWith(
+      'the screen of the other tab surface:2 could not be read',
+    );
+  });
+});
+
+describe('home-base-ruaep.1: --tab and a tab still showing its tty from before the cmux restart', () => {
+  test('a stale target tab is kept, named, and its Claude is not signalled', async () => {
+    const w = world({
+      ...handoffPair(),
+      options: {sessions: [sid(1)]},
+      previous: restoredTtys({[surfId(1)]: 'ttys01'}),
+    });
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.exitCode).toBe(0);
+    expect(writes(w)).toEqual([]);
+    expect(result.state?.planned).toEqual([]);
+    expect((result.state?.unresolved ?? []).map((e) => e.reason)).toEqual([
+      "surface:1 shows terminal ttys01, the number it had before cmux restarted at 2026-11-17 21:36; cmux keeps a restored number until the tab's shell reports a new one, so whether ttys01 is still this tab's terminal cannot be told, and what runs in it cannot be checked. Close it in cmux by hand if nothing there matters",
+    ]);
+  });
+
+  test('a stale other tab keeps the target tab', async () => {
+    const w = world({
+      ...handoffPair(),
+      options: {sessions: [sid(1)]},
+      previous: restoredTtys({[surfId(2)]: 'ttys02'}),
+    });
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(writes(w)).toEqual([]);
+    expect(result.state?.kept[0]?.reasons).toContain(
+      "the other tab surface:2 shows terminal ttys02, the number it had before cmux restarted at 2026-11-17 21:36; cmux keeps a restored number until the tab's shell reports a new one, so whether ttys02 is still this tab's terminal cannot be told, and what runs in it cannot be checked. Close it in cmux by hand if nothing there matters",
+    );
+  });
+
+  test('a target tab re-reported since launch closes as today', async () => {
+    const w = world({
+      ...handoffPair(),
+      options: {sessions: [sid(1)]},
+      previous: restoredTtys({[surfId(1)]: 'ttys077', [surfId(2)]: 'ttys078'}),
+    });
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(writes(w)).toContain('kill 1001');
+    expect(result.state?.closed.map((e) => e.tab?.surfaceId)).toEqual([
+      surfId(1),
+    ]);
+  });
+
+  test('AC 3, --tab: two tabs report the Claude’s tty, one stale; no signal and no close', async () => {
+    const pair = handoffPair();
+    const w = world({
+      ...pair,
+      model: windowOf([
+        {
+          n: 1,
+          tabs: [tab(1, [idleClaude(sid(1))]), tab(2, [idleClaude(sid(2))])],
+        },
+        {n: 2, tabs: [tab(3, [idleClaude(sid(1))], {tty: 'ttys01'})]},
+      ]),
+      options: {sessions: [sid(1)]},
+      previous: restoredTtys({[surfId(3)]: 'ttys01'}),
+    });
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(writes(w)).toEqual([]);
+    expect(result.state?.closed ?? []).toEqual([]);
   });
 });

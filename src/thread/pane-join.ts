@@ -266,6 +266,36 @@ export function flattenTree(tree: RawTree): LiveSurface[] {
   return out;
 }
 
+/**
+ * home-base-v8z8d.2.3: the `cmux tree` surface types that hold no process,
+ * so no shell and no Claude: viewer panels. cmux answers `read-screen` on
+ * one with "invalid_params: Surface is not a terminal" (measured 2026-11-19
+ * on cmux 0.65.2, a markdown surface with tty null).
+ *
+ * An allow-list, not "anything but terminal": cmux 0.65.2's PanelType
+ * (Sources/Panels/Panel.swift) has 17 types, and `agentSession` runs
+ * `claude -p` with no terminal (AgentSessionProvider.swift). A type not
+ * listed here is read as before, and an unreadable screen keeps its
+ * workspace (critical rule 7).
+ */
+export const NO_PROCESS_SURFACE_TYPES: readonly string[] = [
+  'browser',
+  'markdown',
+];
+
+/**
+ * True only when cmux's tree says the surface is a viewer that holds no
+ * process (NO_PROCESS_SURFACE_TYPES). A surface the tree does not list, or
+ * lists with no type (flattenTree reads that as 'terminal'), is not one.
+ * Every close decision skips such a surface's screen read and never keeps a
+ * tab or workspace for it (home-base-v8z8d.2.3).
+ */
+export function holdsNoProcess(
+  surface: Pick<LiveSurface, 'type'> | null | undefined,
+): boolean {
+  return surface != null && NO_PROCESS_SURFACE_TYPES.includes(surface.type);
+}
+
 /** `ps -Ao pid,ppid,tty,etime,command` output, one Proc per process line. */
 export function parseProcessList(stdout: string): Proc[] {
   const procs: Proc[] = [];

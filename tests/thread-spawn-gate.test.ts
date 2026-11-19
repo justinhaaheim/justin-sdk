@@ -7,8 +7,13 @@
  * then no cmux socket exists, so nothing is reached).
  */
 
+import type {OkSample, Sample, SamplesRead} from '../src/claude-usage-samples';
 import type {CmuxCall} from '../src/thread/cmux';
-import type {HandoffGateResult} from '../src/thread/handoff-gate';
+import type {
+  HandoffGateReaders,
+  HandoffGateResult,
+} from '../src/thread/handoff-gate';
+import type {SpawnGateOutcome} from '../src/thread/spawn-gate';
 import type {Sandbox} from './sandbox';
 
 import {afterEach, describe, expect, test} from 'bun:test';
@@ -19,7 +24,11 @@ import {brShow, runBr} from '../src/beads/br';
 import {writeGuardPass} from '../src/thread/guard-pass';
 import {ensureSessionBead} from '../src/thread/session-bead';
 import {spawnSession} from '../src/thread/spawn';
-import {SPAWN_REFUSAL_INSTRUCTIONS, spawnGate} from '../src/thread/spawn-gate';
+import {
+  SPAWN_REFUSAL_INSTRUCTIONS,
+  spawnGate,
+  spawnUsageUnknownNote,
+} from '../src/thread/spawn-gate';
 import {THREAD_GUARD_HOOK_COMMAND} from '../src/thread-hooks-setup';
 import {initRepo} from './git-fixtures';
 import {needBr} from './pinned-br';
@@ -40,7 +49,12 @@ interface World {
   stateDir: string;
 }
 
-function world(input: {bead: boolean; successor: boolean | null}): World {
+function world(input: {
+  bead: boolean;
+  successor: boolean | null;
+  /** componentConfig.thread.handoff.usage, when a test sets it. */
+  usage?: Record<string, unknown>;
+}): World {
   needBr();
   const sb = createSandbox();
   sandboxes.push(sb);
@@ -54,7 +68,10 @@ function world(input: {bead: boolean; successor: boolean | null}): World {
     spawn: {allowed: true},
   };
   if (input.successor != null) {
-    thread.handoff = {successor: input.successor};
+    thread.handoff = {
+      successor: input.successor,
+      ...(input.usage == null ? {} : {usage: input.usage}),
+    };
   }
   writeFileSync(
     join(xdg, 'justin-sdk', 'config.json'),
@@ -87,6 +104,30 @@ function world(input: {bead: boolean; successor: boolean | null}): World {
     beadId = filed.beadId;
   }
   return {beadId, env, repo, stateDir};
+}
+
+function stopOf(
+  outcome: SpawnGateOutcome,
+): Extract<SpawnGateOutcome, {kind: 'stop'}> {
+  if (outcome.kind !== 'stop') {
+    throw new Error(`expected a stop, got ${JSON.stringify(outcome)}`);
+  }
+  return outcome;
+}
+
+function goOf(
+  outcome: SpawnGateOutcome,
+): Extract<SpawnGateOutcome, {kind: 'go'}> {
+  if (outcome.kind !== 'go') {
+    throw new Error(`expected a go, got ${JSON.stringify(outcome)}`);
+  }
+  return outcome;
+}
+
+function beadNotes(w: World): string {
+  const shown = brShow({cwd: w.repo}, w.beadId ?? '');
+  if (shown.kind !== 'ok') throw new Error(shown.kind);
+  return shown.issue.notes ?? '';
 }
 
 const REFUSED: HandoffGateResult = {
@@ -169,7 +210,10 @@ describe('thread spawn and the handoff gate', () => {
     const gate = () => {
       throw new Error('the gate must not run with the knob off');
     };
-    expect(await spawnGate({cwd: w.repo, env: w.env}, {gate})).toBeNull();
+    expect(await spawnGate({cwd: w.repo, env: w.env}, {gate})).toEqual({
+      kind: 'go',
+      usageUnknown: null,
+    });
     const cmux = fakeCmux();
     const result = await spawnSession(spawnOptions(w), {run: cmux.run});
     expect(result.exitCode).toBe(0);
@@ -213,12 +257,14 @@ describe('thread spawn and the handoff gate', () => {
 
   test('knob on, gate refuses, the caller has no session bead: exit 3, says it was not recorded', async () => {
     const w = world({bead: false, successor: true});
-    const result = await spawnGate(
-      {cwd: w.repo, env: w.env},
-      {gate: () => Promise.resolve(REFUSED)},
+    const result = stopOf(
+      await spawnGate(
+        {cwd: w.repo, env: w.env},
+        {gate: () => Promise.resolve(REFUSED)},
+      ),
     );
-    expect(result?.exitCode).toBe(3);
-    expect(result?.lines.at(-1)).toStartWith(
+    expect(result.exitCode).toBe(3);
+    expect(result.lines.at(-1)).toStartWith(
       'Not recorded: the calling session has no session bead',
     );
   });
@@ -252,7 +298,7 @@ describe('thread spawn and the handoff gate', () => {
         {cwd: w.repo, env: w.env},
         {gate: () => Promise.resolve(pass)},
       ),
-    ).toBeNull();
+    ).toEqual({kind: 'go', usageUnknown: null});
   });
 
   test('the real spawn gate does not require a cmux pane: it gets past that check', async () => {
@@ -281,14 +327,322 @@ describe('thread spawn and the handoff gate', () => {
       sessionId: SID,
       words,
     });
-    const result = await spawnGate({
-      commandWords: words.slice(1),
-      cwd: w.repo,
-      env,
-    });
-    expect(result?.exitCode).toBe(3);
-    expect(result?.lines[0]).toStartWith(
+    const result = stopOf(
+      await spawnGate({
+        commandWords: words.slice(1),
+        cwd: w.repo,
+        env,
+      }),
+    );
+    expect(result.exitCode).toBe(3);
+    expect(result.lines[0]).toStartWith(
       'thread spawn: refused by the handoff gate: cmuxUnreachable:',
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// home-base-kj353: usage.onUnknown governs a spawn as it governs a handoff.
+// These run the REAL spawn gate (its limits, runHandoffGate) with fake
+// readers, so what the spawn gate hands the handoff gate is what is tested.
+// ---------------------------------------------------------------------------
+
+const GATE_NOW = new Date('2030-01-01T12:00:00.000Z');
+
+function usageWindow(pct: number) {
+  return {pct, resetsAt: null, resetsAtError: null, resetsText: null};
+}
+
+function okSample(input: {minutesAgo: number; week?: number}): OkSample {
+  return {
+    ok: true,
+    raw: 'panel',
+    sampledAt: new Date(
+      GATE_NOW.getTime() - input.minutesAgo * 60_000,
+    ).toISOString(),
+    schema: 1,
+    session: usageWindow(16),
+    week: usageWindow(input.week ?? 60),
+    weekByModel: {},
+  };
+}
+
+function history(...samples: Sample[]): SamplesRead {
+  return {
+    kind: 'ok',
+    lastLineUnreadable: false,
+    path: '/fake/samples.jsonl',
+    samples,
+    unreadable: [],
+  };
+}
+
+const FAILED_SAMPLE: Sample = {
+  ok: false,
+  reason: 'claude -p /usage timed out',
+  sampledAt: new Date(GATE_NOW.getTime() - 10 * 60_000).toISOString(),
+  schema: 1,
+};
+
+/** The spawn set of readers (no chain, no launch record), all passing. */
+function spawnReaders(usage: HandoffGateReaders['usage']): HandoffGateReaders {
+  return {
+    callerScreen: () => {
+      throw new Error('a spawn never reads its caller’s screen');
+    },
+    chain: null,
+    guard: () => ({kind: 'registered', where: ['/fake/.claude/settings.json']}),
+    guardPass: () => ({kind: 'valid', path: '/fake/guard-pass/x.json'}),
+    killSwitch: () => ({kind: 'off', path: '/fake/handoff-off'}),
+    launchRecord: null,
+    liveSessions: () => ({
+      bySource: {agents: 0, hookStore: 0, ps: 3, screen: 0},
+      kind: 'counted',
+      sessionIds: 3,
+      total: 3,
+      unplaced: {background: 0, pane: 0, process: 0},
+    }),
+    pingCmux: () => ({kind: 'ok'}),
+    usage,
+  };
+}
+
+/** The four causes of an unknown reading the bead names, and what each says. */
+const UNKNOWN_CAUSES: [string, HandoffGateReaders['usage'], string][] = [
+  [
+    'a failed newest sample (the 2026-11-18 refusal)',
+    () => history(okSample({minutesAgo: 70}), FAILED_SAMPLE),
+    'is a failed read',
+  ],
+  [
+    'a sample older than maxSampleAgeMinutes',
+    () => history(okSample({minutesAgo: 433})),
+    'is 433 minutes old',
+  ],
+  [
+    'no usage history',
+    () => ({kind: 'missing', path: '/fake/samples.jsonl'}),
+    'there is no usage history',
+  ],
+  [
+    'an unreadable usage history',
+    () => ({kind: 'failed', path: '/fake/samples.jsonl', reason: 'EACCES'}),
+    'EACCES',
+  ],
+];
+
+const LET_THROUGH =
+  '⚠️ unknown; the usage check let the spawn go on (usage.onUnknown is allow): ';
+
+describe('usage.onUnknown reaches thread spawn (home-base-kj353)', () => {
+  for (const [name, usage, detail] of UNKNOWN_CAUSES) {
+    test(`allow (the default) lets ${name} through, and notes it on the caller’s bead`, async () => {
+      const w = world({bead: true, successor: true});
+      const outcome = goOf(
+        await spawnGate(
+          {commandWords: [], cwd: w.repo, env: w.env, now: GATE_NOW},
+          {readers: () => spawnReaders(usage)},
+        ),
+      );
+      expect(outcome.usageUnknown?.detail).toContain(detail);
+      expect(outcome.usageUnknown?.noted).toEqual({
+        beadId: w.beadId ?? '?',
+        kind: 'noted',
+      });
+      expect(beadNotes(w)).toContain(
+        spawnUsageUnknownNote(outcome.usageUnknown?.detail ?? '?'),
+      );
+    });
+  }
+
+  test('the Usage line is on every outcome after the gate: opened, cmux refused, cmux unconfirmed, workspace unconfirmed', async () => {
+    const w = world({bead: true, successor: true});
+    const [, usage, detail] = UNKNOWN_CAUSES[0] ?? [];
+    if (usage == null || detail == null) throw new Error('no cause');
+    const gate = (input: {cwd: string; env: typeof w.env}) =>
+      spawnGate(
+        {commandWords: [], cwd: input.cwd, env: input.env, now: GATE_NOW},
+        {readers: () => spawnReaders(usage)},
+      );
+    const opened = fakeCmux();
+    const cmuxes: [string, (args: readonly string[]) => Promise<CmuxCall>][] = [
+      ['opened', opened.run],
+      [
+        'cmux cannot be reached',
+        (args) =>
+          args[0] === 'ping'
+            ? Promise.resolve({
+                kind: 'failed',
+                reason: 'no socket',
+                timedOut: false,
+              })
+            : opened.run(args),
+      ],
+      [
+        'cmux did not confirm a new workspace',
+        (args) =>
+          args[0] === 'new-workspace'
+            ? Promise.resolve({kind: 'ok', stdout: 'ERROR nope\n'})
+            : opened.run(args),
+      ],
+      [
+        'a workspace WAS opened',
+        (args) =>
+          args.includes('tree')
+            ? Promise.resolve({
+                kind: 'failed',
+                reason: 'tree unreadable',
+                timedOut: false,
+              })
+            : opened.run(args),
+      ],
+    ];
+    const exits: Record<string, number> = {};
+    for (const [outcome, run] of cmuxes) {
+      const result = await spawnSession(spawnOptions(w), {gate, run});
+      exits[outcome] = result.exitCode;
+      const text = result.lines.join('\n');
+      if (outcome !== 'opened') expect(text).toContain(outcome);
+      expect(text).toContain(LET_THROUGH);
+      expect(text).toContain(detail);
+    }
+    expect(exits).toEqual({
+      'a workspace WAS opened': 1,
+      'cmux cannot be reached': 2,
+      'cmux did not confirm a new workspace': 1,
+      opened: 0,
+    });
+  });
+
+  test('a known reading prints no Usage line and writes no note', async () => {
+    const w = world({bead: true, successor: true});
+    const before = beadNotes(w);
+    const gate = (input: {cwd: string; env: typeof w.env}) =>
+      spawnGate(
+        {commandWords: [], cwd: input.cwd, env: input.env, now: GATE_NOW},
+        {
+          readers: () =>
+            spawnReaders(() => history(okSample({minutesAgo: 30}))),
+        },
+      );
+    const result = await spawnSession(spawnOptions(w), {
+      gate,
+      run: fakeCmux().run,
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.lines.join('\n')).not.toContain('Usage');
+    expect(beadNotes(w)).toBe(before);
+  });
+
+  test('a caller with no session bead: the output says the note was not recorded, and why', async () => {
+    const w = world({bead: false, successor: true});
+    const [, usage] = UNKNOWN_CAUSES[0] ?? [];
+    if (usage == null) throw new Error('no cause');
+    const result = await spawnSession(spawnOptions(w), {
+      gate: (input) =>
+        spawnGate(
+          {commandWords: [], cwd: input.cwd, env: input.env, now: GATE_NOW},
+          {readers: () => spawnReaders(usage)},
+        ),
+      run: fakeCmux().run,
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.lines.join('\n')).toContain(
+      '(not noted: the calling session has no session bead (',
+    );
+  });
+
+  test('a note that cannot be written: the output says so, with br’s reason', async () => {
+    const w = world({bead: true, successor: true});
+    const [, usage] = UNKNOWN_CAUSES[0] ?? [];
+    if (usage == null) throw new Error('no cause');
+    const outcome = goOf(
+      await spawnGate(
+        {commandWords: [], cwd: w.repo, env: w.env, now: GATE_NOW},
+        {
+          appendNote: (input) => ({
+            kind: 'failed',
+            reason: `${input.beadId} was not updated: database is locked`,
+          }),
+          readers: () => spawnReaders(usage),
+        },
+      ),
+    );
+    expect(outcome.usageUnknown?.noted).toEqual({
+      kind: 'notNoted',
+      reason: `${w.beadId ?? '?'} was not updated: database is locked`,
+    });
+  });
+
+  test('a fresh reading over a ceiling still refuses: usageHigh, exit 3', async () => {
+    const w = world({bead: true, successor: true});
+    const result = stopOf(
+      await spawnGate(
+        {commandWords: [], cwd: w.repo, env: w.env, now: GATE_NOW},
+        {
+          readers: () =>
+            spawnReaders(() => history(okSample({minutesAgo: 30, week: 95}))),
+        },
+      ),
+    );
+    expect(result.exitCode).toBe(3);
+    expect(result.lines[0]).toStartWith(
+      'thread spawn: refused by the handoff gate: usageHigh: the week window is at 95 % (ceiling 90 %)',
+    );
+  });
+
+  test('a stale reading whose week was over its ceiling and has not reset still refuses: usageHigh, exit 3', async () => {
+    const w = world({bead: true, successor: true});
+    const result = stopOf(
+      await spawnGate(
+        {commandWords: [], cwd: w.repo, env: w.env, now: GATE_NOW},
+        {
+          readers: () =>
+            spawnReaders(() => history(okSample({minutesAgo: 433, week: 95}))),
+        },
+      ),
+    );
+    expect(result.exitCode).toBe(3);
+    expect(result.lines[0]).toStartWith(
+      'thread spawn: refused by the handoff gate: usageHigh: the week window was at 95 % (ceiling 90 %)',
+    );
+    expect(result.lines[0]).toContain('the current reading is unknown');
+  });
+
+  test('usage.onUnknown refuse: an unknown reading refuses with usageUnknown, as before', async () => {
+    const w = world({
+      bead: true,
+      successor: true,
+      usage: {onUnknown: 'refuse'},
+    });
+    const [, usage, detail] = UNKNOWN_CAUSES[0] ?? [];
+    if (usage == null || detail == null) throw new Error('no cause');
+    const result = stopOf(
+      await spawnGate(
+        {commandWords: [], cwd: w.repo, env: w.env, now: GATE_NOW},
+        {readers: () => spawnReaders(usage)},
+      ),
+    );
+    expect(result.exitCode).toBe(3);
+    expect(result.lines[0]).toStartWith(
+      'thread spawn: refused by the handoff gate: usageUnknown:',
+    );
+    expect(result.lines[0]).toContain(detail);
+    expect(beadNotes(w)).not.toContain('usage unknown at spawn');
+  });
+
+  test('with the pacing hold on, an unknown reading still refuses as paceUnknown', async () => {
+    const w = world({bead: true, successor: true, usage: {paceHold: true}});
+    const [, usage] = UNKNOWN_CAUSES[0] ?? [];
+    if (usage == null) throw new Error('no cause');
+    const result = stopOf(
+      await spawnGate(
+        {commandWords: [], cwd: w.repo, env: w.env, now: GATE_NOW},
+        {readers: () => spawnReaders(usage)},
+      ),
+    );
+    expect(result.lines[0]).toStartWith(
+      'thread spawn: refused by the handoff gate: paceUnknown:',
     );
   });
 });

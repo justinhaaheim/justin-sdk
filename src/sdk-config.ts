@@ -487,7 +487,7 @@ const componentConfigSchema = z
                   .enum(['allow', 'refuse'])
                   .optional()
                   .describe(
-                    'What a handoff does when the usage reading is unknown (no history, a failed newest sample, or one older than maxSampleAgeMinutes). `allow` (default since 2026-11-12, home-base-2gi9h.7) hands off anyway, prints a ⚠️ Usage line and notes it on the session bead; it still refuses when the newest good sample’s week window was over maxWeekPercent and has not reset since. `refuse` refuses with usageUnknown, as before. `thread spawn` refuses on an unknown reading whatever this says.',
+                    'What a handoff does when the usage reading is unknown (no history, a failed newest sample, or one older than maxSampleAgeMinutes). `allow` (default since 2026-11-12, home-base-2gi9h.7) hands off anyway, prints a ⚠️ Usage line and notes it on the session bead; it still refuses when the newest good sample’s week window was over maxWeekPercent and has not reset since. `refuse` refuses with usageUnknown, as before. `thread spawn` follows this setting too (since 2026-11-19, home-base-kj353): with `allow` it starts the session, prints a ⚠️ Usage line and notes it on the calling session’s bead.',
                   ),
                 paceHold: z
                   .boolean()

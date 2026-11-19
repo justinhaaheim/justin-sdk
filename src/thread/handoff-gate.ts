@@ -454,7 +454,8 @@ export interface HandoffGateLimits {
     /**
      * home-base-2gi9h.7: `allow` passes an unknown usage reading (and reports
      * it as `{unknown}` in the facts); absent or `refuse` refuses, as before.
-     * The resolved knob defaults to allow; `thread spawn` passes refuse.
+     * The resolved knob defaults to allow; `thread spawn` passes it as
+     * resolved, like `thread handoff` (home-base-kj353).
      */
     onUnknown?: HandoffUsageUnknownMode;
     paceHold?: boolean;

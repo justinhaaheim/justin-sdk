@@ -1014,8 +1014,10 @@ describe('thread spawn when cmux is slow', () => {
         },
       },
     );
-    expect(result?.exitCode).toBe(4);
-    expect(result?.lines.join('\n')).toContain('Run the same command again');
+    expect(result.kind === 'stop' && result.exitCode).toBe(4);
+    expect(result.kind === 'stop' ? result.lines.join('\n') : '').toContain(
+      'Run the same command again',
+    );
     expect(recorded).toEqual([]);
   });
 });

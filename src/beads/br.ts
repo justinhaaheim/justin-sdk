@@ -168,8 +168,11 @@ export function brSpawnEnv(env: BrEnv | undefined): Record<string, string> {
  */
 export const BR_LOCK_TIMEOUT_MS = 20_000;
 
-/** Past this, br is killed. A br waiting on a held lock can get this far. */
-const BR_SPAWN_TIMEOUT_MS = 60_000;
+/**
+ * Past this, br is killed. A br waiting on a held lock can get this far.
+ * Exported for the threads dashboard's answer deadline (home-base-kwand.34).
+ */
+export const BR_SPAWN_TIMEOUT_MS = 60_000;
 
 const BEADS_LOCKED_TEXT =
   /database is (?:locked|busy)|SQLITE_(?:BUSY|LOCKED)|br timed out/i;

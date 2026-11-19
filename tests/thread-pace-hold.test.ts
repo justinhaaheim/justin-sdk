@@ -336,15 +336,18 @@ describe('the knob reaches the gate from the config, and on to `thread spawn`', 
 
   test('on in the project config: a spawn exits 3, and prints the numbers', async () => {
     const result = await spawnWith(configWorld({paceHold: true}), HOLD_LEVEL);
-    expect(result?.exitCode).toBe(3);
-    const text = (result?.lines ?? []).join('\n');
+    expect(result.kind === 'stop' && result.exitCode).toBe(3);
+    const text = (result.kind === 'stop' ? result.lines : []).join('\n');
     expect(text).toContain('refused by the handoff gate: paceHold');
     expect(text).toContain('30.0 points ahead of an even pace');
     expect(text).toContain('do not retry the spawn');
   });
 
   test('not mentioned in the config: the same spawn goes on', async () => {
-    expect(await spawnWith(configWorld(null), HOLD_LEVEL)).toBeNull();
+    expect(await spawnWith(configWorld(null), HOLD_LEVEL)).toEqual({
+      kind: 'go',
+      usageUnknown: null,
+    });
   });
 
   test('home-base’s own config leaves the hold off', () => {

@@ -322,8 +322,9 @@ export type HandoffPermissionMode = (typeof HANDOFF_PERMISSION_MODES)[number];
  * Justin 2026-11-12). `allow` hands off anyway and says so in its output and
  * on the session bead; `refuse` is the behaviour before that date. A known-high
  * reading refuses either way, and so does a stale one whose week window was
- * over its ceiling and has not reset since. `thread spawn` always refuses on
- * unknown: it starts new work, where a handoff continues work already running.
+ * over its ceiling and has not reset since. `thread spawn` follows the same
+ * setting (home-base-kj353, Justin 2026-11-19): with `allow` it starts the
+ * session and says so in its output and on the calling session's bead.
  */
 export const HANDOFF_USAGE_UNKNOWN_MODES = ['allow', 'refuse'] as const;
 

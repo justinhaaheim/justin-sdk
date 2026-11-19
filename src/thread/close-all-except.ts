@@ -59,6 +59,8 @@ export const KEEP_KIND_ORDER: readonly KeepKind[] = [
   'keepFlag',
   'unknown',
   'pinned',
+  // home-base-ruaep.1: before sharedTty, so a stale tab is named as stale.
+  'staleTty',
   'sharedTty',
   'unreadableScreen',
   'severalClaude',
@@ -82,7 +84,8 @@ export const KEEP_KIND_WORDS: Record<KeepKind, string> = {
   keepFlag: 'named with --keep',
   marked: 'marked (⭐ or another mark)',
   noClaudeProcess: 'Claude on screen, no claude process on its tty',
-  noPane: 'no pane listed',
+  // home-base-v8z8d.2.3: also a workspace of browser or markdown tabs only.
+  noPane: 'no pane or no terminal tab listed',
   noResume: 'no resume command',
   noSessionLine: 'no ⌗ session line',
   notChecked: 'not checked',
@@ -94,6 +97,7 @@ export const KEEP_KIND_WORDS: Record<KeepKind, string> = {
   running: 'a program running',
   severalClaude: 'more than one Claude',
   sharedTty: 'shared tty',
+  staleTty: 'tty unchanged since the cmux restart',
   startingOrDialog: 'Claude starting or showing a dialog',
   ttyUnknown: 'tty unknown',
   unconfirmedProcess: 'claude process not confirmed',

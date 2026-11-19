@@ -61,6 +61,7 @@ import type {
   RecordedTabsResult,
 } from './close';
 import type {CmuxRunner, CmuxTree} from './cmux';
+import type {RestoredTtys} from './cmux-session-file';
 import type {InputDraftWrite, WriteInputDraftInput} from './input-drafts';
 import type {
   HookStore,
@@ -70,6 +71,7 @@ import type {
   ScreenRead,
 } from './pane-join';
 import type {EnvLike} from './paths';
+import type {TtyProof} from './stale-tty';
 import type {ActivityTimes} from './transcript-activity';
 import type {PidCommand} from './workspace-close';
 
@@ -102,6 +104,7 @@ import {activityWords, locateWorkspace, opensDir, writeJsonFile} from './open';
 import {
   blankScreen,
   findInputBox,
+  holdsNoProcess,
   idleShellScreen,
   isShellScaffolding,
   normalizeTty,
@@ -116,6 +119,12 @@ import {
 } from './pane-join';
 import {tildeText} from './part-one';
 import {liveSocketPath, socketSettingsJson} from './respawn';
+import {
+  staleKeepOf,
+  staleRefsOnTty,
+  staleSharersWords,
+  ttyProofOf,
+} from './stale-tty';
 import {readActivity} from './transcript-activity';
 import {
   pinnedKeepWords,
@@ -360,9 +369,16 @@ export type GateReasonKind =
   | 'running'
   | 'severalClaude'
   | 'sharedTty'
+  /** home-base-ruaep.1: a tab shows the tty cmux restored from before its restart. */
+  | 'staleTty'
   | 'startingOrDialog'
   | 'ttyUnknown'
   | 'unconfirmedProcess'
+  /**
+   * home-base-ruaep.1: whether a tab's tty is stale could not be proven
+   * (cmux's `-previous` layout unreadable or absent, or a tab with no id).
+   */
+  | 'unknown'
   | 'unreadableScreen'
   | 'unsentText'
   | 'working';
@@ -603,11 +619,16 @@ export type Assessment =
       suggestions: GateSuggestion[];
     };
 
-/** What one pass of the gates reads: the tree twice (windows; ttys), ps. */
+/**
+ * What one pass of the gates reads: the tree twice (windows; ttys), ps, and
+ * (home-base-ruaep.1) cmux's `-previous` layout, as which tabs' ttys are
+ * stale. Required, so no gate pass can skip the stale-tty check.
+ */
 export interface LiveView {
   procs: Proc[];
   surfaces: LiveSurface[];
   tree: CmuxTree;
+  ttyProof: TtyProof;
 }
 
 function windowOf(tree: CmuxTree, workspaceId: string): string | null {
@@ -699,10 +720,50 @@ export async function gateSurfaces(
   if (surfaceIds.length === 0) {
     keep('noPane', 'cmux lists no pane in it, so nothing on it can be checked');
   }
-  for (const surfaceId of surfaceIds) {
-    const surface = view.surfaces.find(
+  const surfaceOf = (surfaceId: string): LiveSurface | undefined =>
+    view.surfaces.find(
       (candidate) => candidate.id?.toUpperCase() === surfaceId.toUpperCase(),
     );
+  // home-base-v8z8d.2.3: a browser or markdown tab holds no process, so its
+  // screen is not read (cmux refuses: "Surface is not a terminal") and it
+  // never keeps the workspace. A workspace of such tabs ONLY is still kept,
+  // as before this change (then for its unreadable screen): no Claude runs
+  // in it to stop, so closing it frees nothing this command is for.
+  const viewers = surfaceIds
+    .map((surfaceId) => surfaceOf(surfaceId))
+    .filter((surface) => holdsNoProcess(surface));
+  if (surfaceIds.length > 0 && viewers.length === surfaceIds.length) {
+    keep(
+      'noPane',
+      `it holds no terminal tab, only ${viewers.map((surface) => `${surface?.ref ?? '?'} (${surface?.type ?? '?'})`).join(', ')}, so no Claude runs in it to stop; close it in cmux by hand`,
+    );
+  }
+  const collect = (
+    surfaceId: string,
+    surface: LiveSurface | undefined,
+    gate: PaneGate,
+    dropKinds: readonly GateReasonKind[] = [],
+  ): void => {
+    for (const [index, kind] of gate.kinds.entries()) {
+      if (dropKinds.includes(kind)) continue;
+      keep(kind, gate.reasons[index] ?? '');
+    }
+    claude.push(...gate.claude);
+    if (gate.draft != null) drafts.push({...gate.draft, surfaceId});
+    if (gate.suggestion != null) {
+      suggestions.push({
+        surfaceId,
+        surfaceRef: surface?.ref ?? surfaceId,
+        text: gate.suggestion,
+      });
+    }
+    if (gate.shown != null && !sessions.includes(gate.shown)) {
+      sessions.push(gate.shown);
+    }
+  };
+  for (const surfaceId of surfaceIds) {
+    const surface = surfaceOf(surfaceId);
+    if (holdsNoProcess(surface)) continue;
     const tty = normalizeTty(surface?.tty);
     const label = `pane ${surface?.ref ?? surfaceId}`;
     // Dead and hibernated surfaces can keep reporting a tty a newer pane has
@@ -714,6 +775,40 @@ export async function gateSurfaces(
         : view.surfaces.filter(
             (candidate) => normalizeTty(candidate.tty) === tty,
           ).length;
+    // home-base-ruaep.1: a tab whose tty cmux restored from before its
+    // restart, and never saw re-reported, keeps its workspace, and no
+    // process on that tty is taken for its own (as F22 does for a shared
+    // tty). Its screen is still read: unsent text, a working indicator and
+    // its ⌗ line are its own. The --close-shared-tty pass never reaches it.
+    const held =
+      surface == null
+        ? null
+        : staleKeepOf(view.ttyProof, view.surfaces, surface, label);
+    if (held != null) {
+      keep(held.kind, held.text);
+      weak.push(
+        held.kind === 'staleTty'
+          ? `${label} shows tty ${held.tty ?? '?'}, the number cmux restored from before its restart`
+          : `whether ${label}'s tty ${held.tty ?? '?'} is stale is unknown`,
+      );
+      const screen = await readScreenForBox(run, surface?.ref ?? surfaceId);
+      // No process is placed on it: an empty list, so the gate reads only
+      // the screen. "No claude process on its tty" would be false words.
+      collect(
+        surfaceId,
+        surface,
+        gatePane({
+          ...(hookPids == null ? {} : {hookPids}),
+          label,
+          procsOnTty: [],
+          screen,
+          sessionId,
+          tty,
+        }),
+        ['noClaudeProcess'],
+      );
+      continue;
+    }
     const procsOnTty =
       tty == null
         ? null
@@ -756,31 +851,21 @@ export async function gateSurfaces(
     if (sharers > 1 && !onlyShells) {
       keep(
         'sharedTty',
-        `${label} reports tty ${tty}, which ${sharers - 1} other pane${sharers === 2 ? '' : 's'} also report, so which processes are its own cannot be told`,
+        `${label} reports tty ${tty}, which ${sharers - 1} other pane${sharers === 2 ? '' : 's'} also report, so which processes are its own cannot be told${tty == null ? '' : staleSharersWords(staleRefsOnTty(view.ttyProof, view.surfaces, tty, surface?.ref ?? null), tty)}`,
       );
     }
-    const gate = gatePane({
-      ...(hookPids == null ? {} : {hookPids}),
-      label,
-      procsOnTty,
-      screen,
-      sessionId,
-      tty,
-    });
-    reasons.push(...gate.reasons);
-    kinds.push(...gate.kinds);
-    claude.push(...gate.claude);
-    if (gate.draft != null) drafts.push({...gate.draft, surfaceId});
-    if (gate.suggestion != null) {
-      suggestions.push({
-        surfaceId,
-        surfaceRef: surface?.ref ?? surfaceId,
-        text: gate.suggestion,
-      });
-    }
-    if (gate.shown != null && !sessions.includes(gate.shown)) {
-      sessions.push(gate.shown);
-    }
+    collect(
+      surfaceId,
+      surface,
+      gatePane({
+        ...(hookPids == null ? {} : {hookPids}),
+        label,
+        procsOnTty,
+        screen,
+        sessionId,
+        tty,
+      }),
+    );
   }
   if (sessionId == null) {
     if (sessions.length > 1) {
@@ -899,7 +984,6 @@ async function assessWorkspace(
       .flatMap((window) => window.workspaces)
       .find((each) => each.id.toUpperCase() === workspaceId.toUpperCase())
       ?.pinned,
-    'workspace',
   );
   if (pinned != null) reasons.unshift(pinned);
   reasons.push(
@@ -940,6 +1024,10 @@ export interface UndoDeps {
   readHookStore: CloseDeps['readHookStore'];
   /** `--close-tabs`: the live sessions, as thread close --tab reads them. */
   readLive: CloseDeps['readLive'];
+  /** `--close-tabs` (home-base-kwand.28): cmux's session file, for a pinned tab. */
+  readLiveSessionFile: CloseDeps['readLiveSessionFile'];
+  /** home-base-ruaep.1: cmux's `-previous` layout, for the stale-tty check. */
+  readRestoredTtys: () => RestoredTtys;
   /** `--close-tabs`: a session's resume command, for closes.jsonl. */
   resumeOf: CloseDeps['resumeOf'];
   run: CmuxRunner;
@@ -1278,7 +1366,7 @@ export type ViewRead =
 
 /** One gate pass's reads (shared with close.ts): any source failing fails the whole read. */
 export async function readView(
-  deps: Pick<UndoDeps, 'ps' | 'run'>,
+  deps: Pick<UndoDeps, 'ps' | 'readRestoredTtys' | 'run'>,
 ): Promise<ViewRead> {
   const [tree, surfaces, procs] = await Promise.all([
     readCmuxTree(deps.run),
@@ -1294,7 +1382,13 @@ export async function readView(
   }
   return {
     kind: 'read',
-    view: {procs: procs.value, surfaces: surfaces.value, tree: tree.tree},
+    view: {
+      procs: procs.value,
+      surfaces: surfaces.value,
+      tree: tree.tree,
+      // home-base-ruaep.1: read with every pass, beside the tree it judges.
+      ttyProof: ttyProofOf(surfaces.value, deps.readRestoredTtys()),
+    },
   };
 }
 
@@ -1510,7 +1604,7 @@ async function moveBack(
  */
 async function closeLeftBlank(
   moves: readonly RecordedMove[],
-  deps: Pick<UndoDeps, 'ps' | 'run'>,
+  deps: Pick<UndoDeps, 'ps' | 'readRestoredTtys' | 'run'>,
   state: UndoState,
   dryRun: boolean,
   save: () => string | null,
@@ -2279,6 +2373,8 @@ export async function undoOpen(
       (async (sessionId) => await realActivity(sessionId, env)),
     readHookStore: closeReal.readHookStore,
     readLive: closeReal.readLive,
+    readLiveSessionFile: closeReal.readLiveSessionFile,
+    readRestoredTtys: closeReal.readRestoredTtys,
     resumeOf: closeReal.resumeOf,
     run: deps.run ?? realCmuxRunner(undefined, cmuxEnv),
     sleep:

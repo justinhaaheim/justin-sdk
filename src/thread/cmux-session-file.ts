@@ -29,7 +29,7 @@
  * `stableSurfaceId` is a different value and is not read.
  */
 
-import {existsSync, readFileSync} from 'node:fs';
+import {existsSync, readFileSync, statSync} from 'node:fs';
 import {homedir} from 'node:os';
 import {join} from 'node:path';
 
@@ -83,6 +83,13 @@ export interface SessionPanel {
   directory?: string | null;
   /** The surface's uuid: the live tree's surface `id` (97 of 97, 2026-10-17). */
   id: string;
+  /**
+   * home-base-kwand.28: a pinned TAB. cmux refuses a normal close-surface of
+   * one ("Failed to close surface", cmux v0.65.2.2 Workspace.swift). `cmux
+   * tree --json` does not carry it; this file does, on every panel (51 of 51
+   * on 2026-11-19).
+   */
+  isPinned?: boolean | null;
   terminal?: {
     agent?: {
       kind?: string | null;
@@ -161,13 +168,16 @@ function readJson(
   }
 }
 
+/** The lenient read: the file, or why it could not be read. */
+export type SessionFileRead =
+  | {ok: false; reason: string}
+  | {ok: true; value: SessionFile};
+
 /**
  * The session file. A missing file is a failure, as for the hook store:
  * without it no status-line id can be confirmed (critical rule 7).
  */
-export function readSessionFile(
-  path: string,
-): {ok: false; reason: string} | {ok: true; value: SessionFile} {
+export function readSessionFile(path: string): SessionFileRead {
   const read = readJson(path);
   if (!read.ok) return read;
   const parsed = read.value;
@@ -182,6 +192,122 @@ export function readSessionFile(
     };
   }
   return {ok: true, value: parsed as SessionFile};
+}
+
+/**
+ * home-base-kwand.28: whether one tab is pinned, by its surface uuid, from
+ * the live session file. `unknown` when the file could not be read, does not
+ * list the tab, or does not say true or false: never "not pinned" (rule 7).
+ */
+export type PinnedTab =
+  | {kind: 'pinned'}
+  | {kind: 'notPinned'}
+  | {kind: 'unknown'; reason: string};
+
+export function pinnedTabOf(
+  read: SessionFileRead,
+  surfaceId: string,
+): PinnedTab {
+  if (!read.ok) return {kind: 'unknown', reason: read.reason};
+  const want = surfaceId.toUpperCase();
+  const found = sessionPanels(read.value).filter(
+    (entry) => entry.panel.id.toUpperCase() === want,
+  );
+  const [only] = found;
+  if (only == null) {
+    return {kind: 'unknown', reason: "cmux's session file does not list it"};
+  }
+  if (found.length > 1) {
+    return {
+      kind: 'unknown',
+      reason: `cmux's session file lists it ${found.length} times`,
+    };
+  }
+  const value: unknown = only.panel.isPinned;
+  if (value === true) return {kind: 'pinned'};
+  if (value === false) return {kind: 'notPinned'};
+  return {
+    kind: 'unknown',
+    reason: "cmux's session file does not say whether it is pinned",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The terminal numbers cmux restored at its last launch (home-base-ruaep.1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Each panel's `ttyName` in `session-com.cmuxterm.app-previous.json`, by
+ * panel id (upper-cased), or why the file could not be read.
+ *
+ * What the file is (cmux v0.65.2.2, commit 12023d89, read 2026-11-19):
+ *  - It is written once per launch, before anything restores:
+ *    AppDelegate.swift:3863-3876 `finishPreparingStartupSessionSnapshot`
+ *    decodes the primary file once, then calls
+ *    `syncManualRestoreSnapshotCachePruningCrashDiagnostics`
+ *    (AppDelegate+CrashSessionSnapshotRemoval.swift:21-63), which saves the
+ *    pruned primary over `-previous` (line 45). It has no other writer:
+ *    SessionSnapshotRepository.swift:488-490 names the file; the only saves
+ *    to it are line 45 and the unused `syncManualRestoreSnapshotCache`.
+ *  - The restore reads the same decoded primary, pruned the same way
+ *    (AppDelegate.swift:3921-3931), so on a normal launch every restored
+ *    panel's ttyName is exactly its `-previous` value. A restored terminal
+ *    keeps its panel id as its surface id (Workspace.swift:2042-2043), and
+ *    its ttyName is set from the snapshot as display-only metadata
+ *    (Workspace.swift:2456-2460, AgentDeliveryTargetResolution.swift:151-158)
+ *    until the new shell's report_tty replaces it.
+ *  - Exceptions, accepted: after an unclean exit `-previous` is kept from an
+ *    earlier launch when it still loads (CrashSessionSnapshotRemoval.swift
+ *    :37-40); a restore into a live surface with the same id gets a fresh id
+ *    (Workspace.swift:2042). Both can make a stale tab look re-reported.
+ *  - Absent: cmux deletes it when the primary is missing after a clean exit
+ *    (CrashSessionSnapshotRemoval.swift:46-51), and then restores nothing
+ *    (AppDelegate.swift:3933-3940). But a primary that is unusable restores
+ *    from the session history with no `-previous` (AppDelegate.swift
+ *    :3941-3961), so absence does not prove nothing was restored: it is a
+ *    failure here, like a file that cannot be read (critical rule 7).
+ */
+export type RestoredTtys =
+  | {
+      file: string;
+      kind: 'read';
+      /** ttyName as written (null when the panel has none), by upper-cased panel id. */
+      ttyByPanel: ReadonlyMap<string, string | null>;
+      /** The file's mtime: when cmux last launched. Null when it could not be read. */
+      writtenAtMs: number | null;
+    }
+  | {file: string; kind: 'failed'; reason: string};
+
+/** `<cmux support dir>/session-com.cmuxterm.app-previous.json`. */
+export function previousSessionFilePath(
+  env: EnvLike = process.env,
+  home: string = homedir(),
+): string {
+  return join(cmuxSupportDir(env, home), PREVIOUS_SESSION_FILE);
+}
+
+/** Read {@link RestoredTtys} from one `-previous` file. */
+export function readRestoredTtys(path: string): RestoredTtys {
+  const read = readSessionFile(path);
+  if (!read.ok) return {file: path, kind: 'failed', reason: read.reason};
+  const ttyByPanel = new Map<string, string | null>();
+  for (const {panel} of sessionPanels(read.value)) {
+    const id: unknown = panel.id;
+    if (typeof id !== 'string' || id === '') continue;
+    const key = id.toUpperCase();
+    // A duplicate id: cmux restores the second with a fresh id
+    // (Workspace.swift:2042), so the first is the one a live tab can carry.
+    if (ttyByPanel.has(key)) continue;
+    const tty: unknown = panel.ttyName;
+    ttyByPanel.set(key, typeof tty === 'string' ? tty : null);
+  }
+  let writtenAtMs: number | null = null;
+  try {
+    writtenAtMs = statSync(path).mtimeMs;
+  } catch {
+    writtenAtMs = null;
+  }
+  return {file: path, kind: 'read', ttyByPanel, writtenAtMs};
 }
 
 // ---------------------------------------------------------------------------

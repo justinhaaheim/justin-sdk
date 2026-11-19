@@ -1170,8 +1170,10 @@ describe('the spend quota at the handoff and spawn gates', () => {
           ),
       },
     );
-    expect(refusedRun?.exitCode).toBe(3);
-    expect(refusedRun?.lines[0]).toContain('quotaWeekFloor');
+    expect(refusedRun.kind === 'stop' && refusedRun.exitCode).toBe(3);
+    expect(refusedRun.kind === 'stop' && refusedRun.lines[0]).toContain(
+      'quotaWeekFloor',
+    );
     const offRun = await spawnGate(
       {cwd: box.path, env, now: NOW},
       {
@@ -1179,7 +1181,8 @@ describe('the spend quota at the handoff and spawn gates', () => {
           runQuotaCheck(quotaReaders({kind: 'off'}, []), now),
       },
     );
-    expect(offRun).toBeNull();
+    // home-base-kj353: a pass is `go`, never null; the quota reads no usage.
+    expect(offRun).toEqual({kind: 'go', usageUnknown: null});
   });
 });
 

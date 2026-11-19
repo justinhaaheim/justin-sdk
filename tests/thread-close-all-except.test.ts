@@ -13,6 +13,7 @@ import type {
   SessionFactsRead,
 } from '../src/thread/close-all-except';
 import type {CmuxCall} from '../src/thread/cmux';
+import type {RestoredTtys} from '../src/thread/cmux-session-file';
 import type {RawTree} from '../src/thread/pane-join';
 import type {PidCommand} from '../src/thread/workspace-close';
 
@@ -30,6 +31,13 @@ import {
   NO_BREAK_SPACE,
   parseProcessList,
 } from '../src/thread/pane-join';
+import {ttyProofOf} from '../src/thread/stale-tty';
+import {
+  FAKE_PREVIOUS_FILE,
+  NO_RESTORED_TTYS,
+  restoredTtys,
+  UNREADABLE_PREVIOUS,
+} from './stale-tty-fixtures';
 
 const CLAUDE = '/Users/jhaa/.local/bin/claude';
 const NOW = Date.parse('2026-10-20T12:00:00.000Z');
@@ -73,7 +81,12 @@ const IDLE_SHELL = 'Last login: Tue Nov 17 on ttys001\n\n~/Dev\n❯ ';
 interface Pane {
   screen: string;
   surface: number;
-  tty: string;
+  tty: string | null;
+  /**
+   * cmux tree's surface type (home-base-v8z8d.2.3), default 'terminal'. Any
+   * other type's read-screen fails as cmux's does: "Surface is not a terminal".
+   */
+  type?: string;
 }
 interface Ws {
   n: number;
@@ -134,6 +147,8 @@ interface WorldInput {
   noOwn?: boolean;
   options?: Partial<CloseOptions>;
   own?: number;
+  /** home-base-ruaep.1: cmux's `-previous` layout; default lists no tab. */
+  previous?: RestoredTtys;
   procs?: string[];
   /**
    * ps lines that appear right before the first live read, so after the
@@ -192,7 +207,7 @@ function world(input: WorldInput) {
                 ref: `surface:${pane.surface}`,
                 title: 'x',
                 tty: pane.tty,
-                type: 'terminal',
+                type: pane.type ?? 'terminal',
               },
             ],
           })),
@@ -229,6 +244,14 @@ function world(input: WorldInput) {
       }
       const reads = (screenReads.get(pane.surface) ?? 0) + 1;
       screenReads.set(pane.surface, reads);
+      if ((pane.type ?? 'terminal') !== 'terminal') {
+        events.push(`read-screen surface:${pane.surface}`);
+        return Promise.resolve({
+          kind: 'failed',
+          reason: 'Error: invalid_params: Surface is not a terminal',
+          timedOut: false,
+        });
+      }
       const later = input.laterScreens?.[pane.surface];
       return Promise.resolve({
         kind: 'ok',
@@ -269,6 +292,7 @@ function world(input: WorldInput) {
     (input.laterFacts == null ? factsRead : readOf(input.laterFacts));
   /** kwand.22: each facts read's `live` set and its `only` set (null: every session). */
   const factReads: {live: string[]; only: string[] | null}[] = [];
+  const previous = input.previous ?? NO_RESTORED_TTYS;
   const deps: Partial<CloseDeps> = {
     appendLog: (line) => {
       events.push(`log ${line.outcome.split(':')[0]}`);
@@ -317,6 +341,7 @@ function world(input: WorldInput) {
           ),
           store: {},
           surfaces: flattenTree(rawTree()),
+          ttyProof: ttyProofOf(flattenTree(rawTree()), previous),
         }),
       };
       liveReads += 1;
@@ -329,6 +354,7 @@ function world(input: WorldInput) {
       }
       return Promise.resolve(live);
     },
+    readRestoredTtys: () => previous,
     readSessionFacts: (live, only) => {
       const sortedOnly = only == null ? null : [...only].sort();
       events.push(
@@ -1656,5 +1682,99 @@ describe('cmux tree and the session file list different workspace counts (kwand.
     expect(help).toContain(
       "--apply also refuses, with nothing closed, when cmux tree and cmux's saved session file list a different number of workspaces",
     );
+  });
+});
+
+describe('home-base-v8z8d.2.3: a tab that is not a terminal', () => {
+  /** Workspace n: an idle Claude (sid n) on ttys0n, plus a tab of `type`. */
+  function claudeBeside(n: number, type: string): Ws {
+    return {
+      n,
+      panes: [
+        {screen: idleClaude(sid(n)), surface: n, tty: `ttys0${n}`},
+        {screen: '', surface: 10 + n, tty: null, type},
+      ],
+    };
+  }
+
+  test('a markdown or browser tab no longer keeps its workspace; the other keeps are unchanged', async () => {
+    const {keptKinds, planned, result} = await plan({
+      facts: [fact(2), fact(3), fact(4)],
+      procs: [...OWN_PROCS, claudeProc(2), claudeProc(3), claudeProc(4)],
+      workspaces: withOwn([
+        claudeBeside(2, 'markdown'),
+        claudeBeside(3, 'browser'),
+        claudeBeside(4, 'agentSession'),
+      ]),
+    });
+    expect(result.exitCode).toBe(0);
+    expect(planned).toEqual(['workspace:2', 'workspace:3']);
+    expect(keptKinds.get('workspace:2')).toBeUndefined();
+    expect(keptKinds.get('workspace:3')).toBeUndefined();
+    // agentSession runs claude -p with no terminal: still read, still kept.
+    expect(keptKinds.get('workspace:4')).toEqual(['unreadableScreen']);
+    expect(keptKinds.get('workspace:9')).toEqual(['own']);
+    expect(result.output).not.toContain('surface:12 could not be read');
+  });
+
+  test('a workspace of viewer tabs only is kept (noPane), with no screen read and no Claude stopped', async () => {
+    const {keptKinds, planned, result, w} = await plan({
+      procs: OWN_PROCS,
+      workspaces: withOwn([
+        {n: 5, panes: [{screen: '', surface: 15, tty: null, type: 'markdown'}]},
+      ]),
+    });
+    expect(planned).toEqual([]);
+    expect(keptKinds.get('workspace:5')).toEqual(['noPane']);
+    expect(result.output).toContain(
+      'it holds no terminal tab, only surface:15 (markdown), so no Claude runs in it to stop; close it in cmux by hand',
+    );
+    expect(w.events).not.toContain('read-screen surface:15');
+    expect(writes(w)).toEqual([]);
+  });
+});
+
+describe('home-base-ruaep.1: --all-except and a tab still showing its tty from before the cmux restart', () => {
+  test('a stale tab no other tab reports is kept as staleTty; the same tab not stale is planned', async () => {
+    const base: WorldInput = {
+      procs: [...OWN_PROCS, ...shellProcs('ttys04', 4000)],
+      workspaces: withOwn([ws(4, IDLE_SHELL)]),
+    };
+    const before = await plan(base);
+    expect(before.planned).toEqual(['workspace:4']);
+    const after = await plan({
+      ...base,
+      previous: restoredTtys({[surfId(4)]: 'ttys04'}),
+    });
+    expect(after.planned).toEqual([]);
+    expect(after.keptKinds.get('workspace:4')).toEqual(['staleTty']);
+    expect(after.result.output).toContain(
+      'tty unchanged since the cmux restart',
+    );
+  });
+
+  test('--close-shared-tty never lets the stale tab of a pair through; the owner passes as before', async () => {
+    const {keptKinds, planned} = await plan({
+      options: {closeSharedTty: true},
+      previous: restoredTtys({[surfId(1)]: 'ttys05'}),
+      procs: [...OWN_PROCS, ...shellProcs('ttys05', 5000)],
+      workspaces: withOwn([
+        {n: 1, panes: [{screen: IDLE_SHELL, surface: 1, tty: 'ttys05'}]},
+        {n: 2, panes: [{screen: IDLE_SHELL, surface: 2, tty: 'ttys05'}]},
+      ]),
+    });
+    expect(keptKinds.get('workspace:1')).toEqual(['staleTty']);
+    expect(planned).toEqual(['workspace:2']);
+  });
+
+  test('-previous unreadable keeps restored tabs as unknown, naming the file', async () => {
+    const {keptKinds, planned, result} = await plan({
+      previous: UNREADABLE_PREVIOUS,
+      procs: [...OWN_PROCS, ...shellProcs('ttys04', 4000)],
+      workspaces: withOwn([ws(4, IDLE_SHELL)]),
+    });
+    expect(planned).toEqual([]);
+    expect(keptKinds.get('workspace:4')).toEqual(['unknown']);
+    expect(result.output).toContain(FAKE_PREVIOUS_FILE);
   });
 });
