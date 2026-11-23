@@ -68,6 +68,8 @@ import {newestRecord, readExportIndex} from './session-tree';
 export interface ChainBead {
   /** The `.beads/` directory it was read from; null when br found it by a DB path only. */
   beadsDir: null | string;
+  /** br's created_at: the newest of two successors is the one created last (home-base-1vcgs D3). */
+  createdAt?: null | string;
   id: string;
   labels: readonly string[];
   notes: null | string;
@@ -591,6 +593,7 @@ export function realChainWalkReaders(input: {
       return {
         bead: {
           beadsDir: dir,
+          createdAt: issue.createdAt,
           id: issue.id,
           labels: issue.labels,
           notes: issue.notes,
@@ -613,6 +616,7 @@ export function realChainWalkReaders(input: {
     return {
       bead: {
         beadsDir: dirname(located.db),
+        createdAt: located.createdAt ?? null,
         id: located.id,
         labels: located.labels,
         notes: located.notes,

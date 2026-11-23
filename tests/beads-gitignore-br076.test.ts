@@ -31,7 +31,7 @@ import {
   ensureBeadsGitignores,
   runBeadsSetup,
 } from '../src/beads-setup';
-import {git, initRepo} from './git-fixtures';
+import {git, initRepo, sdkRemoteWithOwnTag} from './git-fixtures';
 import {installedBr, needBr} from './pinned-br';
 import {createProjectSandbox, createSandbox} from './sandbox';
 
@@ -162,10 +162,13 @@ describe('runBeadsSetup', () => {
     needBr();
     const sb = sandbox(createProjectSandbox);
     writeFileSync(join(sb.path, '.gitignore'), 'node_modules/\n');
+    // home-base-ejsq2.5: base-setup's pin check asks a local bare remote
+    // holding this SDK's tag, never github.
     const exitCode = await runBeadsSetup({
       noCommit: true,
       projectRoot: sb.path,
       quiet: true,
+      sdkRepoUrl: sdkRemoteWithOwnTag((remote) => sandbox(() => remote)),
     });
     expect(exitCode).toBe(0);
     const root = lines(join(sb.path, '.gitignore'));

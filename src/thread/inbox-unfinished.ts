@@ -52,6 +52,8 @@ export function rowChainFacts(row: InboxRow): ChainSessionFacts {
   const asked = row.card.youAsked;
   return {
     beadId: row.sessionBeadId,
+    // home-base-1vcgs.1 F1: for the newest of two successors.
+    createdAt: row.loaded?.model.beads.session?.createdAt ?? null,
     labels: row.loaded?.model.beads.session?.labels ?? null,
     lastActivityAt: row.lastActivityAt,
     questions:

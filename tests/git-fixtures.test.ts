@@ -20,6 +20,7 @@ import {
 import {tmpdir} from 'node:os';
 import {join, relative} from 'node:path';
 
+import {SDK_REPO_URL} from '../src/sdk-latest';
 import {
   FIXTURE_IDENTITY,
   fixtureConfigText,
@@ -27,6 +28,8 @@ import {
   git,
   initFixtureRepo,
   initPrimary,
+  sharedSdkRemote,
+  withSdkRepoAnsweredBy,
 } from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';
 
@@ -202,5 +205,127 @@ describe('initPrimary, the main shared helper', () => {
     expect(git(primary, ['log', '-1', '--format=%an <%ae> %cn <%ce> %s'])).toBe(
       git(old, ['log', '-1', '--format=%an <%ae> %cn <%ce> %s']),
     );
+  });
+});
+
+/**
+ * home-base-ejsq2.5. Every test here first points every https://github.com/
+ * URL at a path that does not exist, through the same three variables, so a
+ * redirect that did not apply fails at once instead of reaching the network
+ * (and the count is already 1, which is the case the helper must extend).
+ */
+describe('withSdkRepoAnsweredBy: git answers the published SDK URL locally', () => {
+  const GIT_CONFIG_VARS = [
+    'GIT_CONFIG_COUNT',
+    'GIT_CONFIG_KEY_0',
+    'GIT_CONFIG_VALUE_0',
+    'GIT_CONFIG_KEY_1',
+    'GIT_CONFIG_VALUE_1',
+  ];
+  const BLOCK_KEY = 'url.file:///nonexistent-network-blocked/.insteadOf';
+  const sdkVersion = (
+    JSON.parse(
+      readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf-8'),
+    ) as {version: string}
+  ).version;
+
+  function withGithubBlocked(fn: () => Promise<void>): Promise<void> {
+    const saved = GIT_CONFIG_VARS.map((name) => process.env[name]);
+    process.env.GIT_CONFIG_COUNT = '1';
+    process.env.GIT_CONFIG_KEY_0 = BLOCK_KEY;
+    process.env.GIT_CONFIG_VALUE_0 = 'https://github.com/';
+    return fn().finally(() => {
+      GIT_CONFIG_VARS.forEach((name, i) => {
+        const value = saved[i];
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      });
+    });
+  }
+
+  test('the real ls-remote of SDK_REPO_URL lists the local remote, and every variable is put back', async () => {
+    const remote = sharedSdkRemote();
+    try {
+      await withGithubBlocked(async () => {
+        const inside = await withSdkRepoAnsweredBy(remote.url(), () =>
+          Promise.resolve({
+            count: process.env.GIT_CONFIG_COUNT,
+            key: process.env.GIT_CONFIG_KEY_1,
+            listing: git(base, ['ls-remote', '--tags', SDK_REPO_URL]),
+            value: process.env.GIT_CONFIG_VALUE_1,
+          }),
+        );
+        expect(inside.listing).toContain(`\trefs/tags/v${sdkVersion}\n`);
+        expect(inside.listing.trim().split('\n')).toHaveLength(1);
+        expect(inside).toMatchObject({
+          count: '2',
+          key: `url.${remote.url()}.insteadOf`,
+          value: SDK_REPO_URL,
+        });
+        // Back as it was: the count, the existing pair, and no new pair.
+        expect(process.env.GIT_CONFIG_COUNT).toBe('1');
+        expect(process.env.GIT_CONFIG_KEY_0).toBe(BLOCK_KEY);
+        expect(process.env.GIT_CONFIG_KEY_1).toBeUndefined();
+        expect(process.env.GIT_CONFIG_VALUE_1).toBeUndefined();
+      });
+    } finally {
+      remote.cleanup();
+    }
+  });
+
+  test('NEGATIVE CONTROL: without it, the same ls-remote fails, so the test above cannot pass by reaching github', async () => {
+    await withGithubBlocked(() => {
+      expect(() => git(base, ['ls-remote', '--tags', SDK_REPO_URL])).toThrow();
+      return Promise.resolve();
+    });
+  });
+
+  test('a throw inside puts the variables back too', async () => {
+    const remote = sharedSdkRemote();
+    try {
+      await withGithubBlocked(async () => {
+        const thrown = await withSdkRepoAnsweredBy(remote.url(), () =>
+          Promise.reject(new Error('inside')),
+        ).then(
+          () => null,
+          (error: unknown) => error,
+        );
+        expect(thrown).toBeInstanceOf(Error);
+        expect((thrown as Error).message).toBe('inside');
+        expect(process.env.GIT_CONFIG_COUNT).toBe('1');
+        expect(process.env.GIT_CONFIG_KEY_1).toBeUndefined();
+      });
+    } finally {
+      remote.cleanup();
+    }
+  });
+
+  test('a GIT_CONFIG_COUNT that is not a whole number throws, and runs nothing', async () => {
+    await withGithubBlocked(async () => {
+      process.env.GIT_CONFIG_COUNT = 'x';
+      let ran = false;
+      const thrown = await withSdkRepoAnsweredBy('/nowhere', () => {
+        ran = true;
+        return Promise.resolve();
+      }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toContain('not a whole number');
+      expect(ran).toBe(false);
+      expect(process.env.GIT_CONFIG_COUNT).toBe('x');
+    });
+  });
+});
+
+describe('sharedSdkRemote', () => {
+  test('builds one remote on first use, and cleanup removes it', () => {
+    const remote = sharedSdkRemote();
+    const first = remote.url();
+    expect(remote.url()).toBe(first);
+    expect(statSync(first).isDirectory()).toBe(true);
+    remote.cleanup();
+    expect(() => statSync(first)).toThrow();
   });
 });

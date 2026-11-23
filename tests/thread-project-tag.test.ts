@@ -35,7 +35,11 @@ import {readMessagesLine} from '../src/thread/handoff-read-messages';
 import {MAYOR_SUCCESSOR_SENTENCE} from '../src/thread/mayor-sentence';
 import {serializeMessageLine} from '../src/thread/message-log';
 import {partOneView, renderPartOne} from '../src/thread/part-one';
-import {ensureSessionBead, MAYOR_ROLE_LABEL} from '../src/thread/session-bead';
+import {
+  CONDUCTOR_ROLE_LABEL,
+  ensureSessionBead,
+  MAYOR_ROLE_LABEL,
+} from '../src/thread/session-bead';
 import {unreadableAction} from '../src/thread/session-card';
 import {handoffBlock} from '../src/thread/session-handoff';
 import {inboxJson, readInbox, renderInbox} from '../src/thread/session-inbox';
@@ -383,6 +387,55 @@ describe('Part 1 and the handoff block (AC 1)', () => {
       }
     } finally {
       runBr(repo, ['label', 'remove', beadId, '-l', MAYOR_ROLE_LABEL]);
+    }
+  });
+
+  // home-base-eq5oy C2: a conductor session gets the same line, behind the
+  // same knob. A plain session still gets none (the test above).
+  test("the readMessages knob adds the reading line to a conductor's block; off, the block is the plain one", async () => {
+    const title = TITLES['audio-journal-1'] ?? '';
+    const beadId = beads[title] ?? '';
+    const repo = repos['audio-journal-1'] ?? '';
+    const call = async (readMessages: boolean) => {
+      const block = await handoffBlock({
+        cwd: repo,
+        env,
+        note: null,
+        now: NOW,
+        readMessages,
+        sessionBeadId: beadId,
+        sessionId: ids[title] ?? '',
+        timeZone: TZ,
+      });
+      if (!block.ok) throw new Error(block.reason);
+      return block.text;
+    };
+    const line = `- ${readMessagesLine(beadId)}`;
+    const plainOn = await call(true);
+    expect(plainOn).not.toContain(line);
+
+    const added = runBr(repo, [
+      'label',
+      'add',
+      beadId,
+      '-l',
+      CONDUCTOR_ROLE_LABEL,
+    ]);
+    if (!added.ok) throw new Error(`br label add: ${added.reason ?? '?'}`);
+    try {
+      const conductorOff = await call(false);
+      const conductorOn = await call(true);
+      // Off: byte-for-byte the plain block. A conductor has no skill sentence.
+      expect(conductorOff).toBe(plainOn);
+      expect(conductorOff).not.toContain(MAYOR_SUCCESSOR_SENTENCE);
+      // On: the line right after the pickup command, and the only difference.
+      expect(conductorOn).toContain(line);
+      expect(conductorOn).toContain(
+        `--continues ${beadId}\` to receive the handoff from a previous session.\n${line}\n`,
+      );
+      expect(conductorOn.replace(`\n${line}`, '')).toBe(conductorOff);
+    } finally {
+      runBr(repo, ['label', 'remove', beadId, '-l', CONDUCTOR_ROLE_LABEL]);
     }
   });
 

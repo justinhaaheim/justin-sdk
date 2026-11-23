@@ -18,7 +18,7 @@ import {describe, expect, test} from 'bun:test';
 
 import {buildThreadMetadata, readReportCount} from '../src/thread/metadata';
 import {validateThreadReport} from '../src/thread/schema';
-import {examplePayload} from './thread-schema.test';
+import {examplePayload} from './thread-schema-example';
 
 const FACTS: ThreadFacts = {
   aheadBehind: null,

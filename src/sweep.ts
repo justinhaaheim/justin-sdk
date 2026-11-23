@@ -3118,10 +3118,14 @@ export async function applySweepPayload(
   worktree: string,
   payload: SweepPayload,
   /**
-   * Injection points for the `install` payload, so the fixture test can run the
-   * REAL code path offline: `pin` stands in for the published tag (a `file:`
-   * spec resolves without a registry) and `sdkRepoUrl` for the remote the tag
-   * is verified against (a local bare repo is a real remote to git).
+   * Injection points, so the fixture tests can run the REAL code path offline.
+   * Both are absent in production. `pin` (the `install` payload only) stands in
+   * for the published tag: a `file:` spec resolves without a registry.
+   * `sdkRepoUrl` is the remote the SDK tag is verified against (a local bare
+   * repo is a real remote to git): the `install` payload's own check, and the
+   * `component` payload's base-setup, which runs `git ls-remote` when the
+   * target declares no pin (dchjw.17 F7, home-base-ejsq2.9). Absent, both fall
+   * back to the real SDK_REPO_URL.
    */
   options: {pin?: string; sdkRepoUrl?: string} = {},
 ): Promise<PayloadOutcome> {
@@ -3145,6 +3149,7 @@ export async function applySweepPayload(
         noCommit: true,
         projectRoot: worktree,
         quiet: true,
+        ...(options.sdkRepoUrl == null ? {} : {sdkRepoUrl: options.sdkRepoUrl}),
       });
     } catch (error) {
       return {

@@ -432,15 +432,26 @@ describe('item 2: the reverse-link check reads the export only when br confirms 
     brOk(w, ['delete', gone, '--force']);
 
     const listed = brListIds(w, head);
-    // br 0.1.37's order, as measured: priority, then the newest created first;
-    // the deleted bead is left out, the closed and deferred ones are not.
+    // The order on br 0.1.37 and on br 0.7.6, as measured: priority, then the
+    // newest created first; the deleted bead is left out, the closed and
+    // deferred ones are not.
     expect(listed).toEqual([b, e, f, d, a, c, g]);
-    // br 0.1.37's `delete` leaves its change unexported (measured here), so
-    // the check falls back until a write flushes; then the export answers.
-    expect(reverse(w, head)).toEqual({
-      fallback: 'dirty_count 1, db_newer',
-      ids: listed,
-    });
+    // What the check reads right after `delete`, per pinned br, as measured
+    // (home-base-pp1vx.1.1.3): br 0.1.37 leaves the delete unexported, so the
+    // check falls back to br list until a write flushes; br 0.7.6 exports the
+    // delete, so the export answers at once. A version measured neither way
+    // fails here rather than passing on a guess.
+    const afterDelete: Record<string, string | null> = {
+      '0.1.37': 'dirty_count 1, db_newer',
+      '0.7.6': null,
+    };
+    const version = PINNED_BR.kind === 'pinned' ? PINNED_BR.version : null;
+    const fallback = version === null ? undefined : afterDelete[version];
+    if (fallback === undefined)
+      throw new Error(
+        `the export after a delete was not measured on br ${version ?? '(unresolved)'}`,
+      );
+    expect(reverse(w, head)).toEqual({fallback, ids: listed});
     brOk(w, ['sync', '--flush-only']);
     expect(reverse(w, head)).toEqual({fallback: null, ids: listed});
     // And the fallback (status refused) gives br list's own answer.

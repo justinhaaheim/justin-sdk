@@ -38,7 +38,11 @@ import {brShow, describeBrFailed, findBeadsWorkspace} from '../beads/br';
 import {backLinkOf, stepBack} from './chain-step';
 import {type MessageLogRead, readMessageLog} from './message-log';
 import {KICKOFF_OPENING} from './respawn';
-import {CONTINUES_LABEL_PREFIX, SID_LABEL_PREFIX} from './session-bead';
+import {
+  CONTINUES_LABEL_PREFIX,
+  NOT_A_SUCCESSOR_LABEL,
+  SID_LABEL_PREFIX,
+} from './session-bead';
 import {locateSessionBead} from './session-handoff';
 
 /** One session bead as the walk needs it. */
@@ -209,9 +213,13 @@ export function walkUnattendedChain(
       // F12: no continues: label, yet the session began on a handoff
       // kickoff: a successor that never linked. Counting it as the first of
       // a chain would restart the count (the reassuring direction).
+      // home-base-1vcgs D5: a session the pickup refused and labelled
+      // not-a-successor (final) is known never to link, so it is the first
+      // of a new chain and can hand off.
       if (
         userTexts[0] != null &&
-        classifyUserLine(userTexts[0]) === 'kickoff'
+        classifyUserLine(userTexts[0]) === 'kickoff' &&
+        !bead.labels.includes(NOT_A_SUCCESSOR_LABEL)
       ) {
         return unknown(
           `${current} has no ${CONTINUES_LABEL_PREFIX} label but began on a handoff kickoff: a successor that never linked to its predecessor, so where its chain starts is unknown`,

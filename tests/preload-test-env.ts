@@ -14,6 +14,7 @@ import {join} from 'path';
 
 import {installGitPin} from './pinned-git';
 import {installSpawnRecorderFromEnv} from './spawn-recorder';
+import {installTestMarkerFromEnv} from './test-marker';
 
 process.env.XDG_CACHE_HOME = mkdtempSync(
   join(tmpdir(), 'justin-sdk-test-cache-'),
@@ -53,3 +54,12 @@ installGitPin();
  * returns at once and the run is what it was without it.
  */
 installSpawnRecorderFromEnv();
+
+/**
+ * The current-test marker (tests/test-marker.ts, home-base-ejsq2.4), OFF
+ * unless JUSTIN_SDK_TEST_MARKER_DIR names a directory: `bun run
+ * test:parallel` turns it on so its watchdog can name the test a stuck
+ * worker is in. Unset, this call returns at once: it loads nothing, wraps
+ * nothing and registers no hook.
+ */
+installTestMarkerFromEnv();

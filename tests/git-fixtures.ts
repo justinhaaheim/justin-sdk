@@ -18,6 +18,7 @@ import {execFileSync} from 'child_process';
 import {mkdirSync, readFileSync, writeFileSync} from 'fs';
 import {dirname, join} from 'path';
 
+import {SDK_REPO_URL} from '../src/sdk-latest';
 import {createSandbox, type Sandbox} from './sandbox';
 
 export function git(cwd: string, args: string[]): string {
@@ -140,6 +141,82 @@ export function sdkRemoteWithOwnTag(
   const bare = join(host.path, 'remote.git');
   git(host.path, ['clone', '-q', '--bare', work, bare]);
   return bare;
+}
+
+/**
+ * One sdkRemoteWithOwnTag for a whole test file: built on the first `url()`,
+ * removed by `cleanup()`, which the file calls from `afterAll`.
+ *
+ * Sharing is safe because the product only ever READS the remote (`git
+ * ls-remote --tags`), and it saves the four git calls of a fresh remote in
+ * every test after the first (home-base-ejsq2.5).
+ */
+export function sharedSdkRemote(): {cleanup: () => void; url: () => string} {
+  let host: Sandbox | null = null;
+  let url: string | null = null;
+  return {
+    cleanup() {
+      host?.cleanup();
+      host = null;
+      url = null;
+    },
+    url() {
+      url ??= sdkRemoteWithOwnTag((sb) => {
+        host = sb;
+        return sb;
+      });
+      return url;
+    },
+  };
+}
+
+/**
+ * Run `fn` while git answers the published SDK repo URL from `remote`, a local
+ * bare repo (`url.<remote>.insteadOf <SDK_REPO_URL>`, given to every git child
+ * of this process through GIT_CONFIG_COUNT / GIT_CONFIG_KEY_n /
+ * GIT_CONFIG_VALUE_n, git 2.31 and later).
+ *
+ * ONLY for a test that must exercise the DEFAULT remote on purpose: the
+ * negative controls in tests/sdk-repo-url-forwarding.test.ts, which show that
+ * a call without `sdkRepoUrl` asks SDK_REPO_URL. The product still runs its
+ * real `git ls-remote --tags <SDK_REPO_URL>`; git fetches the listing from the
+ * local repo instead of GitHub. Everywhere else, pass `sdkRepoUrl`: every
+ * product path that verifies the SDK pin takes it (home-base-ejsq2.9), it is
+ * the product's own seam, and it is the remote the product's messages name.
+ *
+ * A GIT_CONFIG_COUNT already set is extended, never replaced; a count that is
+ * not a whole number throws rather than guessing. Every variable it touches
+ * is put back as it was, on success and on throw.
+ */
+export async function withSdkRepoAnsweredBy<T>(
+  remote: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const countText = process.env.GIT_CONFIG_COUNT;
+  const count = countText == null ? 0 : Number(countText);
+  if (!Number.isInteger(count) || count < 0 || countText === '') {
+    throw new Error(
+      `withSdkRepoAnsweredBy: GIT_CONFIG_COUNT is ${JSON.stringify(countText)}, not a whole number`,
+    );
+  }
+  const names = [
+    'GIT_CONFIG_COUNT',
+    `GIT_CONFIG_KEY_${count}`,
+    `GIT_CONFIG_VALUE_${count}`,
+  ];
+  const previous = names.map((name) => process.env[name]);
+  process.env[`GIT_CONFIG_KEY_${count}`] = `url.${remote}.insteadOf`;
+  process.env[`GIT_CONFIG_VALUE_${count}`] = SDK_REPO_URL;
+  process.env.GIT_CONFIG_COUNT = String(count + 1);
+  try {
+    return await fn();
+  } finally {
+    names.forEach((name, i) => {
+      const value = previous[i];
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    });
+  }
 }
 
 /** Write a file under `root`, creating parent directories. */

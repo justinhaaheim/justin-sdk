@@ -41,7 +41,7 @@ import {bdContext} from '../src/thread/bd';
 import {writeReportToBd} from '../src/thread/report';
 import {validateThreadReport} from '../src/thread/schema';
 import {createFakeBd, type FakeState} from './fake-bd';
-import {examplePayload} from './thread-schema.test';
+import {examplePayload} from './thread-schema-example';
 
 const OLD_THREAD = 'jl-a';
 const OLD_ASK_ONE = 'jl-a.1';

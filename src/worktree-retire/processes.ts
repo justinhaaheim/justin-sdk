@@ -26,6 +26,8 @@ export interface ProcessHandle {
   fd: string;
   path: string;
   pid: number;
+  /** The parent pid (lsof's `R` field), when lsof gave one. */
+  ppid?: number;
 }
 
 /** Reads every process's open files. Production is `readLsof`; tests inject one. */
@@ -35,6 +37,7 @@ export type ProcessReader = () => Measured<ProcessHandle[]>;
 export function parseLsofFields(text: string): ProcessHandle[] {
   const handles: ProcessHandle[] = [];
   let pid: number | null = null;
+  let ppid: number | null = null;
   let command = '';
   let fd = '';
   for (const line of text.split('\n')) {
@@ -43,15 +46,78 @@ export function parseLsofFields(text: string): ProcessHandle[] {
     const value = line.slice(1);
     if (tag === 'p') {
       pid = /^\d+$/u.test(value) ? Number(value) : null;
+      ppid = null;
       command = '';
       fd = '';
-    } else if (tag === 'c') command = value;
+    } else if (tag === 'R') ppid = /^\d+$/u.test(value) ? Number(value) : null;
+    else if (tag === 'c') command = value;
     else if (tag === 'f') fd = value;
     else if (tag === 'n' && pid != null) {
-      handles.push({command, fd, path: value, pid});
+      handles.push({
+        command,
+        fd,
+        path: value,
+        pid,
+        ...(ppid === null ? {} : {ppid}),
+      });
     }
   }
   return handles;
+}
+
+/**
+ * Null when the listing shows a process outside this process's own tree, or
+ * why it cannot be trusted (home-base-pp1vx.1.1.5 F5). Measured 2026-11-21:
+ * inside the Claude Code sandbox lsof lists only the sandboxed command's own
+ * processes (zsh, bun, lsof: 3 of them, the parent included), and pid 1 is
+ * never listed for a non-root user (outside the sandbox: 963 processes, no
+ * pid 1). So seeing ourselves, or our parent, proves nothing. This walks up
+ * from `selfPid` to the highest ancestor the listing holds and requires a
+ * listed process that is not that ancestor or below it. A listing that holds
+ * pid 1 (run as root) passes: no sandbox shows pid 1.
+ *
+ * At least MIN_FOREIGN_PROCESSES of them (home-base-pp1vx.1.1.9 R4): a daemon
+ * the sandboxed command itself started and that reparented to pid 1 (git gc
+ * --auto, git maintenance --detach after a merge, an fsmonitor daemon) is
+ * outside the tree too, and one or two of those prove nothing. Outside the
+ * sandbox a user session lists hundreds. This only adds refusals.
+ */
+export const MIN_FOREIGN_PROCESSES = 10;
+
+export function foreignProcessCheck(
+  handles: readonly ProcessHandle[],
+  selfPid: number,
+): string | null {
+  const parent = new Map<number, number | undefined>();
+  for (const h of handles) {
+    if (!parent.has(h.pid) || h.ppid !== undefined) parent.set(h.pid, h.ppid);
+  }
+  if (parent.has(1)) return null;
+  if (parent.get(selfPid) === undefined) {
+    return `\`lsof\` gave no parent pid for this process (pid ${selfPid}), so it cannot tell this process's own tree from the rest`;
+  }
+  let top = selfPid;
+  const seen = new Set<number>([selfPid]);
+  for (;;) {
+    const up = parent.get(top);
+    if (up === undefined || !parent.has(up) || seen.has(up)) break;
+    seen.add(up);
+    top = up;
+  }
+  const inTree = (pid: number): boolean => {
+    const path = new Set<number>();
+    let cur: number | undefined = pid;
+    while (cur !== undefined && !path.has(cur)) {
+      if (cur === top) return true;
+      path.add(cur);
+      cur = parent.get(cur);
+    }
+    return false;
+  };
+  const foreign = [...parent.keys()].filter((pid) => !inTree(pid));
+  return foreign.length >= MIN_FOREIGN_PROCESSES
+    ? null
+    : `\`lsof\` listed only this process's own tree (${parent.size - foreign.length} processes under pid ${top}) and ${foreign.length} other process(es), fewer than ${MIN_FOREIGN_PROCESSES}, as it does inside a sandbox, so its listing cannot be trusted to show other processes`;
 }
 
 /** The real reader. `selfPid`/`selfCwd` are the self-test (see the file comment). */
@@ -61,7 +127,7 @@ export function readLsof(
 ): Measured<ProcessHandle[]> {
   let stdout: string;
   try {
-    stdout = execFileSync('lsof', ['-n', '-P', '-w', '-F', 'pcfn'], {
+    stdout = execFileSync('lsof', ['-n', '-P', '-w', '-F', 'pcfnR'], {
       encoding: 'utf-8',
       maxBuffer: 512 * 1024 * 1024,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -84,6 +150,8 @@ export function readLsof(
       ok: false,
     };
   }
+  const blind = foreignProcessCheck(handles, selfPid);
+  if (blind !== null) return {error: blind, ok: false};
   return {ok: true, value: handles};
 }
 

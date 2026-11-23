@@ -498,6 +498,98 @@ describe('knob on: refusals before anything is written (exit 2)', () => {
   });
 });
 
+describe('home-base-1vcgs.1 F4: a successor this session already names (knob on, D2)', () => {
+  const S1 = 't-s1';
+  /** This session was continued by S1 before it was resumed. */
+  function continuedBy(w: World): void {
+    const written = brUpdate({cwd: w.repo}, w.beadId, {
+      addLabels: [`continued-by:${S1}`],
+    });
+    if (written.kind === 'failed') throw new Error('br update failed');
+  }
+  const reading =
+    (activity: {kind: 'stopped'} | {kind: 'working'; lastRecordAt: string}) =>
+    () =>
+      Promise.resolve({activity, kind: 'read' as const, sessionId: 'sid-s1'});
+  const WORKING = {
+    kind: 'working' as const,
+    lastRecordAt: '2030-01-01T09:59:00.000Z',
+  };
+  const STOPPED_LINE = `This session was already continued by ${S1}, which has stopped; the new successor becomes the newest.`;
+
+  test('working now: exit 2 before the gate, with nothing written and no cmux call', async () => {
+    const w = world(ON);
+    continuedBy(w);
+    const cmux = fakeCmux();
+    const gate = gateOf(PASS);
+    const result = await threadHandoffCommand(opts(w), {
+      ...deps(cmux, gate),
+      readSuccessorActivity: reading(WORKING),
+    });
+    expect(result.exitCode).toBe(2);
+    expect(result.lines.join('\n')).toContain(
+      `thread handoff: refused: ${S1} continues this session and is working now; continue there (claude --resume sid-s1)`,
+    );
+    expect(gate.seen).toEqual([]);
+    expect(cmux.calls).toEqual([]);
+    expect(bead(w).labels).not.toContain('handed-off');
+    expect(existsSync(handoffsDir(w))).toBe(false);
+  });
+
+  test('working now, dry run: the Successors field says a real run would refuse, and nothing is written', async () => {
+    const w = world(ON);
+    continuedBy(w);
+    const cmux = fakeCmux();
+    const notesBefore = bead(w).notes;
+    const result = await threadHandoffCommand(opts(w, {dryRun: true}), {
+      ...deps(cmux, gateOf(PASS)),
+      readSuccessorActivity: reading(WORKING),
+    });
+    expect(result.exitCode).toBe(0);
+    const text = stripAnsi(result.lines.join('\n'));
+    expect(text).toContain('Dry run: nothing written or opened');
+    expect(text).toMatch(
+      new RegExp(
+        `Successors:\\s+a real run would refuse: ${S1} continues this session and is working now`,
+        'u',
+      ),
+    );
+    expect(writeCalls(cmux.calls)).toEqual([]);
+    expect(bead(w).labels).not.toContain('handed-off');
+    expect(bead(w).notes).toBe(notesBefore);
+    expect(existsSync(handoffsDir(w))).toBe(false);
+  });
+
+  test('stopped: the one line, in the dry run and in the real run, which goes ahead', async () => {
+    const dry = world(ON);
+    continuedBy(dry);
+    const dryResult = await threadHandoffCommand(opts(dry, {dryRun: true}), {
+      ...deps(fakeCmux(), gateOf(PASS)),
+      readSuccessorActivity: reading({kind: 'stopped'}),
+    });
+    expect(dryResult.exitCode).toBe(0);
+    expect(stripAnsi(dryResult.lines.join('\n'))).toMatch(
+      new RegExp(`Successors:\\s+${STOPPED_LINE}`, 'u'),
+    );
+    expect(bead(dry).labels).not.toContain('handed-off');
+
+    const w = world(ON);
+    continuedBy(w);
+    const cmux = fakeCmux();
+    const gate = gateOf(PASS);
+    const result = await threadHandoffCommand(opts(w), {
+      ...deps(cmux, gate),
+      readSuccessorActivity: reading({kind: 'stopped'}),
+    });
+    expect(result.exitCode).toBe(0);
+    expect(stripAnsi(result.lines.join('\n'))).toMatch(
+      new RegExp(`Successors:\\s+${STOPPED_LINE}`, 'u'),
+    );
+    expect(gate.seen).toHaveLength(1);
+    expect(bead(w).labels).toContain('handed-off');
+  });
+});
+
 describe('knob on: the gate refuses (exit 3, C2)', () => {
   test('hands off, records the refusal, prints the block and the message, opens nothing', async () => {
     const w = world(ON);

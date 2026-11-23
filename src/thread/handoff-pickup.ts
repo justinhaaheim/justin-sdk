@@ -19,10 +19,16 @@
  *      is final. Justin's question on this is open; refusing is its stated
  *      default. Two `continues:` labels make the handoff gate refuse this
  *      session's next handoff (chainUnknown, handoff-chain.ts).
- *   a. One successor per predecessor (P4): the link is made only when the
- *      predecessor has no `continued-by:` yet or already names this session.
- *      Otherwise it writes nothing except, once, `not-a-successor` and one note
- *      line on this session. That label is terminal.
+ *   a. One successor per handoff (P4, as revised by home-base-1vcgs D1): the
+ *      link is made when the predecessor has no `continued-by:` yet, already
+ *      names this session, or handed off again after every successor it names
+ *      was created (a session resumed after its successor stopped, then handed
+ *      off again: replacementVerdict). Otherwise it writes nothing except, once,
+ *      `not-a-successor` and one note line on this session. That label is
+ *      terminal. A /clear inside the successor, or a second session started
+ *      from the same kickoff, is still refused: the predecessor has not handed
+ *      off since that successor was created. When the times cannot be read the
+ *      pickup fails and retries, writing nothing.
  *   b. The link, with linkContinuation, when either half is missing.
  *   c. Every open request OF THE PREDECESSOR is adopted (request-writes.ts).
  *      "Of the predecessor" means readSessionTree, the query that decides what a
@@ -64,12 +70,13 @@ import {
   resolveRecordedBeadsDb,
 } from '../beads/br';
 import {sdkRun} from '../sdk-invocation';
-import {continuedByOf, continuesOf} from './handoff-view';
+import {continuedByOf, continuesOf, handedOffAtOf} from './handoff-view';
 import {adoptBead, titleSetEdit} from './request-writes';
 import {
   AUTO_TITLE_LABEL,
   CONTINUED_BY_LABEL_PREFIX,
   CONTINUES_LABEL_PREFIX,
+  HANDED_OFF_LABEL,
   labelValue,
   NOT_A_SUCCESSOR_LABEL,
   PICKED_UP_LABEL,
@@ -106,6 +113,8 @@ export interface PickedItems {
 export type PickUpStep =
   | 'adopt-requests'
   | 'carry-questions'
+  /** home-base-1vcgs D1: whether this is a newer handoff's successor. */
+  | 'check-replacement'
   | 'find-predecessor'
   | 'link'
   | 'lock'
@@ -137,6 +146,12 @@ export type PickUpOutcome =
       oldBeadId: string;
       oldTitle: string;
       renamedSession: {beadId: string; title: string} | null;
+      /**
+       * home-base-1vcgs D1: the successors the predecessor named before this
+       * one, which this session now follows as the newest; absent or empty
+       * when it named none.
+       */
+      replaces?: string[];
       workspaceNote: string | null;
       /** False on a run that found it all done: no bead or index line changed. */
       wrote: boolean;
@@ -227,6 +242,80 @@ function notLinkedRecord(oldBeadId: string, continuedBy: string): string {
 }
 
 const NOT_LINKED_RECORD = /not linked: \S+ is already continued by (\S+)/;
+
+/** D1's answer for a predecessor that already names other successors. */
+export type ReplacementVerdict =
+  /** The predecessor handed off again after every one of them was created. */
+  | {kind: 'accept'}
+  /** Measured: it has not handed off since `other` was created. */
+  | {kind: 'refuse'; other: string; reason: string}
+  /** A time could not be read: nothing is decided, the pickup retries. */
+  | {kind: 'unknown'; reason: string};
+
+/** One successor the predecessor already names, as read for D1. */
+export type NamedSuccessor =
+  | {createdAt: null | string; id: string; kind: 'read'}
+  | {id: string; kind: 'unreadable'; reason: string};
+
+/**
+ * home-base-1vcgs D1, pure. The evidence of the predecessor's newest handoff
+ * is its newest dated "handed off" note line (handedOffAtOf): handOff() writes
+ * it on every path of `thread handoff`, with the knob on or off, gate refused
+ * or not, while the launch record is written only when a tab opens. The line's
+ * stamp is local time to the minute (noteStamp), read back on the same machine
+ * as local time. A handoff counts as newer than a successor only when its
+ * whole minute starts after the successor's bead was created, so a successor
+ * created in the minute of the handoff it picked up (the usual case, 15 s or
+ * so after the kickoff) keeps refusing a /clear of itself.
+ */
+export function replacementVerdict(input: {
+  others: readonly NamedSuccessor[];
+  predecessor: {id: string; labels: readonly string[]; notes: null | string};
+}): ReplacementVerdict {
+  const {predecessor} = input;
+  const [first] = input.others;
+  if (first == null) return {kind: 'accept'};
+  const stamp = handedOffAtOf(predecessor.labels, predecessor.notes);
+  if (stamp == null) {
+    return {
+      kind: 'refuse',
+      other: first.id,
+      reason: `${predecessor.id} is already continued by ${first.id} and has not handed off since (it carries no ${HANDED_OFF_LABEL} label)`,
+    };
+  }
+  const handedAt = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/u.test(stamp)
+    ? new Date(stamp.replace(' ', 'T')).getTime()
+    : Number.NaN;
+  if (Number.isNaN(handedAt)) {
+    return {
+      kind: 'unknown',
+      reason: `when ${predecessor.id} last handed off could not be read: ${stamp}`,
+    };
+  }
+  let unknown: null | string = null;
+  for (const other of input.others) {
+    if (other.kind === 'unreadable') {
+      unknown ??= `${other.id}, which already continues ${predecessor.id}, could not be read: ${other.reason}`;
+      continue;
+    }
+    const createdAt =
+      other.createdAt == null ? Number.NaN : Date.parse(other.createdAt);
+    if (Number.isNaN(createdAt)) {
+      unknown ??= `${other.id}, which already continues ${predecessor.id}, carries no readable creation time (${other.createdAt ?? 'none'})`;
+      continue;
+    }
+    if (handedAt <= createdAt) {
+      return {
+        kind: 'refuse',
+        other: other.id,
+        reason: `${predecessor.id} is already continued by ${other.id}, and its newest handoff (${stamp}) is not newer than ${other.id} (created ${other.createdAt ?? '?'})`,
+      };
+    }
+  }
+  return unknown == null
+    ? {kind: 'accept'}
+    : {kind: 'unknown', reason: unknown};
+}
 
 function continuedByInRecord(notes: string | null): string | null {
   return NOT_LINKED_RECORD.exec(notes ?? '')?.[1] ?? null;
@@ -533,33 +622,63 @@ export async function pickUpHandoff(
     );
   }
 
-  // ---- a. one successor per predecessor (P4) ----
+  // ---- a. one successor per handoff (P4, home-base-1vcgs D1) ----
   const successors = continuedByOf(old.labels);
   const namesMe = successors.includes(newBeadId);
-  const [other] = successors.filter((id) => id !== newBeadId);
-  if (other != null && !namesMe) {
-    const written = update({db: newDb, env}, newBeadId, {
-      addLabels: [NOT_A_SUCCESSOR_LABEL],
-      notes: appendNote(
-        mine.issue.notes,
-        notLinkedRecord(oldBeadId, other),
-        now,
-      ),
+  const others = successors.filter((id) => id !== newBeadId);
+  let replaces: string[] = [];
+  if (others.length > 0 && !namesMe) {
+    const verdict = replacementVerdict({
+      others: others.map((id): NamedSuccessor => {
+        const read = locateSessionBead(id, env, fallbacks);
+        if (read.kind === 'found') {
+          return {createdAt: read.createdAt ?? null, id, kind: 'read'};
+        }
+        return {
+          id,
+          kind: 'unreadable',
+          reason:
+            read.kind === 'failed'
+              ? read.reason
+              : `not found in ${read.searched.length > 0 ? read.searched.join(' or ') : 'any beads DB'}`,
+        };
+      }),
+      predecessor: {id: oldBeadId, labels: old.labels, notes: old.notes},
     });
-    if (written.kind === 'failed') {
+    if (verdict.kind === 'unknown') {
       return failed(
-        'mark-not-a-successor',
-        `${oldBeadId} is already continued by ${other}, but this session could not be labelled ${NOT_A_SUCCESSOR_LABEL}: ${describeBrFailed(written)}`,
+        'check-replacement',
+        `${oldBeadId} is already continued by ${others.join(' and ')}, and whether this session continues a newer handoff could not be established, so nothing was written: ${verdict.reason}`,
       );
     }
-    return {
-      continuedBy: other,
-      kind: 'not-a-successor',
-      newBeadId,
-      oldBeadId,
-      reason: `${oldBeadId} is already continued by ${other}`,
-      recordedNow: true,
-    };
+    if (verdict.kind === 'refuse') {
+      const other = verdict.other;
+      const written = update({db: newDb, env}, newBeadId, {
+        addLabels: [NOT_A_SUCCESSOR_LABEL],
+        notes: appendNote(
+          mine.issue.notes,
+          notLinkedRecord(oldBeadId, other),
+          now,
+        ),
+      });
+      if (written.kind === 'failed') {
+        return failed(
+          'mark-not-a-successor',
+          `${oldBeadId} is already continued by ${other}, but this session could not be labelled ${NOT_A_SUCCESSOR_LABEL}: ${describeBrFailed(written)}`,
+        );
+      }
+      return {
+        continuedBy: other,
+        kind: 'not-a-successor',
+        newBeadId,
+        oldBeadId,
+        reason: `${oldBeadId} is already continued by ${other}`,
+        recordedNow: true,
+      };
+    }
+    replaces = others;
+  } else if (namesMe) {
+    replaces = others;
   }
   const oldSession = predecessorSessionId(old, oldBeadId, env);
   if (!oldSession.ok) return failed('find-predecessor', oldSession.reason);
@@ -572,7 +691,8 @@ export async function pickUpHandoff(
     const linked = link({
       cwd,
       env,
-      newSession: {beadId: newBeadId, db: newDb},
+      // home-base-eq5oy C4: read above, so a conductor link needs no second read.
+      newSession: {beadId: newBeadId, db: newDb, labels: myLabels},
       oldBeadId,
     });
     if (linked.kind === 'failed') return failed('link', linked.reason);
@@ -715,6 +835,8 @@ export async function pickUpHandoff(
     oldBeadId,
     oldTitle: old.title,
     renamedSession: progress.renamedSession,
+    // Only when it replaced one: a pickup that succeeds today keeps its shape.
+    ...(replaces.length > 0 ? {replaces} : {}),
     workspaceNote: progress.workspaceNote,
     wrote,
   };
@@ -809,6 +931,12 @@ export function describePickUp(
           byHolder
             ? `  This command waited ${waited} s for process ${lockWait.holderPid}, which held this session's lock; the pickup was not done when the wait began.`
             : `  This command first waited ${waited} s for process ${lockWait.holderPid}, which held this session's lock.`,
+        );
+      }
+      // home-base-1vcgs D1: the predecessor handed off again after these.
+      if ((outcome.replaces ?? []).length > 0) {
+        lines.push(
+          `  ${oldBeadId} was already continued by ${(outcome.replaces ?? []).join(' and ')}, then handed off again; this session is now its newest successor.`,
         );
       }
       lines.push(...carriedLines(outcome));

@@ -86,6 +86,7 @@ import type {
   SnapshotItems,
 } from './report-delta';
 import type {RequestStateLine} from './request-state';
+import type {CodeReviewsLoad, CodeReviewsView} from './review-findings';
 import type {ActionLine, OptionalLine} from './session-card';
 import type {SessionCommits} from './session-commits';
 import type {SessionModel} from './session-model';
@@ -134,6 +135,11 @@ import {
   NO_CHAIN_LOOKUP,
   requestStatesOf,
 } from './request-state';
+import {
+  ansiCodeReviews,
+  codeReviewsShown,
+  markdownCodeReviews,
+} from './review-findings';
 import {cutOnWord} from './session-bead';
 import {firstUserLine, newestLogAt, userLines} from './session-model';
 import {sessionDisplayName, sessionMarksOf} from './session-name';
@@ -283,6 +289,8 @@ export interface PartOneView {
   changes?: ChangesView | null;
   /** home-base-88y8m D4: `## From Claude`, or null when there is no message. */
   claudeMessage?: ClaudeMessageView | null;
+  /** home-base-g22jt.7: "🔎 Code review findings" (review-findings.ts), or null. */
+  codeReviews?: CodeReviewsView | null;
   /**
    * home-base-1rxt0.4: why nothing is marked new or changed and every question
    * is in full, when the last report could not be established; else null.
@@ -576,6 +584,8 @@ export interface PartOneInput {
    * changes nothing. Absent or false: the full report.
    */
   changesOnly?: boolean;
+  /** home-base-g22jt.7: this session's review-gate reviews; absent: none. */
+  codeReviews?: CodeReviewsLoad | null;
   counts: StatusCounts;
   /**
    * home-base-1rxt0.4: the last report and the compact switch, from `thread
@@ -1030,6 +1040,12 @@ export function partOneView(input: PartOneInput): PartOneView {
     snapshot[questionKey(question.id)] = questionFingerprint(question);
     shownById.set(question.id, questionShown(question, delta));
   });
+  // home-base-g22jt.7: reviews are marked and collapsed by the same snapshot.
+  const reviews = codeReviewsShown(input.codeReviews, {
+    baseline: delta?.baseline ?? null,
+    when: (at) => absoluteWhen(at, timeZone),
+  });
+  Object.assign(snapshot, reviews.snapshot);
 
   // ---- home-base-88y8m D1: `--changes` keeps only what changed ----
   // The snapshot above stays the FULL set: the next report compares with
@@ -1263,6 +1279,7 @@ export function partOneView(input: PartOneInput): PartOneView {
     beadProblems: beads.problems.map(tildeText),
     changes: changes?.view ?? null,
     claudeMessage,
+    codeReviews: reviews.view,
     deltaProblem: problem == null ? null : tildeText(problem),
     git: tilded(gitFields),
     messages: messages.map((message) => ({
@@ -1600,6 +1617,7 @@ function renderMarkdown(view: PartOneView): string {
     markdownProgress(view),
     markdownMessages(view.messages),
     questions,
+    markdownCodeReviews(view.codeReviews),
     markdownOtherQuestions(view),
     markdownClaudeMessage(view),
     spacedList([
@@ -1878,6 +1896,7 @@ function renderAnsi(view: PartOneView, style: OutputStyle): string {
     ansiProgress(view, style),
     ansiMessages(view.messages, style),
     questions,
+    ansiCodeReviews(view.codeReviews, style),
     ansiOtherQuestions(view, style),
     ansiClaudeMessage(view, style),
     spacedList([

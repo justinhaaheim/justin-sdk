@@ -6,7 +6,7 @@
  * and writes the hook file), so they're fully offline and fast.
  */
 
-import {afterEach, describe, expect, test} from 'bun:test';
+import {afterAll, afterEach, describe, expect, test} from 'bun:test';
 import {existsSync, mkdirSync, readFileSync, statSync, writeFileSync} from 'fs';
 import {join, resolve} from 'path';
 
@@ -19,11 +19,12 @@ import {
   PRE_COMMIT_TS_CHECK_MARKER_END,
   readPostCheckoutPreamble,
   readPreCommitTsCheckBlock,
-  runHuskySetup,
+  runHuskySetup as runHuskySetupReal,
   withoutPreCommitTsCheckBlock,
 } from '../src/husky-setup';
 import {PINNED} from '../src/pinned-versions';
 import {TS_CHECK_IN_HOOK_DEFAULT} from '../src/pre-commit-ts-check/defaults';
+import {sharedSdkRemote} from './git-fixtures';
 import {createProjectSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
@@ -39,6 +40,23 @@ afterEach(() => {
     sb?.cleanup();
   }
 });
+
+const sdkRemote = sharedSdkRemote();
+afterAll(() => {
+  sdkRemote.cleanup();
+});
+
+/**
+ * home-base-ejsq2.5: base-setup, chained by the installer, verifies the SDK pin
+ * with a real `git ls-remote` against a LOCAL bare remote holding this SDK's
+ * tag (sharedSdkRemote), never github. With the default remote this file made
+ * 26 calls a run to github (343 ms each on average, 2026-11-14).
+ */
+function runHuskySetup(
+  options: Parameters<typeof runHuskySetupReal>[0] = {},
+): Promise<number> {
+  return runHuskySetupReal({sdkRepoUrl: sdkRemote.url(), ...options});
+}
 
 const TEMPLATE_PATH = resolve(
   import.meta.dirname,

@@ -546,18 +546,40 @@ describe('writeSdkPin — the workspace consumer (D21)', () => {
     expect(result.summaryNote).toBe('pin: workspace-satisfied, not written');
   });
 
-  test('NEGATIVE CONTROL: the un-skipped write converts it to a github-pin consumer', () => {
-    // What a full sweep of home-base did before D21 — and it would have gone
-    // GREEN: a second declaration beside `workspace:*`, on the repo that hosts
-    // the SDK’s own development loop.
+  test('NEGATIVE CONTROL: the un-skipped write converts it to a github-pin consumer, and goes green', () => {
+    // What a full sweep of home-base would do without D21: the pin write's own
+    // bun recipe — `bun remove <sdk>`, then `bun add -d <pin>` (writeSdkPin's
+    // REMOVE_ARGV and PIN_ARGV; keep this in step with them) — run on the same
+    // fixture. It drops `workspace:*`, so the repo that hosts the SDK's own
+    // development loop now resolves the SDK from a pin, and it leaves exactly
+    // one declaration at the pin, so every post-condition the pin step checks
+    // passes and the sweep would report it green (commit b0a0c1ff).
+    //
+    // Why it replays the recipe and not a bare `bun add -d` (home-base-9ngiz,
+    // 2026-11-21): the bare add is not what the pin step runs, and what it does
+    // to this fixture changed between bun versions. The old assertions passed
+    // on bun 1.4.2 (SDK publish v0.76.7, 2026-11-19), so there it left a second
+    // declaration beside `workspace:*`. On bun 1.4.5 it MOVES the declaration
+    // instead: `dependencies` is deleted and `devDependencies` holds the pin
+    // (measured 2026-11-21, with and without a `bun install` first). After the
+    // remove nothing is declared, so the add below does not depend on how bun
+    // treats an existing declaration.
     const project = homeBaseLike();
-    execFileSync('bun', ['add', '-d', 'file:../sdk-new'], {
-      cwd: project.root,
-      stdio: 'ignore',
-    });
-    const declared = declarationsOf(project.root);
-    expect(declared.dependencies).toBe('workspace:*');
-    expect(declared.devDependencies).toBe('file:../sdk-new');
+    const pin = 'file:../sdk-new';
+    for (const argv of [
+      ['remove', SDK_PKG],
+      ['add', '-d', pin],
+    ]) {
+      execFileSync('bun', argv, {cwd: project.root, stdio: 'ignore'});
+    }
+
+    // Converted: `workspace:*` is gone and the pin is the only declaration.
+    expect(declarationsOf(project.root)).toEqual({devDependencies: pin});
+    // Green: the two checks writeSdkPin runs after its add both pass.
+    expect(countSdkKeyDeclarations(project.read())).toBe(1);
+    const after = readSdkDeclarations(project.root);
+    if (!after.ok) throw new Error(`unreadable fixture: ${after.reason}`);
+    expect(verifySinglePin(after.declared, pin)).toEqual({ok: true});
   });
 });
 

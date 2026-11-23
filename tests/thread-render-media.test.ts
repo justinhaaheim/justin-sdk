@@ -29,7 +29,7 @@ import {renderMarkdown} from '../src/thread/render-markdown';
 import {classifyReport} from '../src/thread/report-lines';
 import {buildReportModel} from '../src/thread/report-model';
 import {validateThreadReport} from '../src/thread/schema';
-import {examplePayload} from './thread-schema.test';
+import {examplePayload} from './thread-schema-example';
 
 const ESC = '\u001b[';
 // cli-style emits one combined SGR sequence per styled piece (k0b8n.10).

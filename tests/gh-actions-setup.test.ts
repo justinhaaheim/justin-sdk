@@ -7,11 +7,12 @@
  * No external tools needed — pure filesystem ops.
  */
 
-import {afterEach, describe, expect, test} from 'bun:test';
+import {afterAll, afterEach, describe, expect, test} from 'bun:test';
 import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 
-import {runGhActionsSetup} from '../src/gh-actions-setup';
+import {runGhActionsSetup as runGhActionsSetupReal} from '../src/gh-actions-setup';
+import {sharedSdkRemote} from './git-fixtures';
 import {createProjectSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
@@ -27,6 +28,23 @@ afterEach(() => {
     sb?.cleanup();
   }
 });
+
+const sdkRemote = sharedSdkRemote();
+afterAll(() => {
+  sdkRemote.cleanup();
+});
+
+/**
+ * home-base-ejsq2.5: base-setup, chained by the installer, verifies the SDK pin
+ * with a real `git ls-remote` against a LOCAL bare remote holding this SDK's
+ * tag (sharedSdkRemote), never github. With the default remote this file made
+ * 5 calls a run to github (343 ms each on average, 2026-11-14).
+ */
+function runGhActionsSetup(
+  options: Parameters<typeof runGhActionsSetupReal>[0] = {},
+): Promise<number> {
+  return runGhActionsSetupReal({sdkRepoUrl: sdkRemote.url(), ...options});
+}
 
 describe('gh-actions-setup', () => {
   test('fresh project: writes signal.yml, and registers NOTHING (F11)', async () => {

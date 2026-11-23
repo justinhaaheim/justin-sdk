@@ -12,10 +12,14 @@
  *
  * WHAT IS REAL HERE, and what is stood in for. The payload, the adoption
  * detector, the config surgery, the package-manager pin write and the whole
- * `install` run are the shipping code. Two things are injected so the test is
+ * `install` run are the shipping code. Three things are injected so the test is
  * hermetic: the pin is a local `file:` spec (a github tag would need the
- * network to resolve, exactly as in sweep-pin.test.ts) and the prompts source
- * is a local git fixture via JSDK_PROMPTS_DIR (as in rules-drift.test.ts).
+ * network to resolve, exactly as in sweep-pin.test.ts), the fixture's prettier
+ * declaration is a local `file:` stand-in (a semver spec would need the
+ * registry once the pin write runs `bun remove`), and the prompts source is a
+ * local git fixture via JSDK_PROMPTS_DIR (as in rules-drift.test.ts). Bun's
+ * registry is pointed at a closed port for the whole file, so a fetch fails
+ * loudly instead of passing wherever the network is open.
  *
  * NEGATIVE CONTROL, and it is the point of the whole design: the same fixture
  * says, before anything is adopted, that a REMOVAL-ENABLED install would delete
@@ -23,7 +27,7 @@
  * measured rather than asserted.
  */
 
-import {afterEach, describe, expect, test} from 'bun:test';
+import {afterAll, afterEach, beforeAll, describe, expect, test} from 'bun:test';
 import {execFileSync} from 'child_process';
 import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'fs';
 import {join} from 'path';
@@ -47,12 +51,30 @@ import {createSandbox, type Sandbox} from './sandbox';
 const SDK_PKG = '@justinhaaheim/justin-sdk';
 const OLD_PIN = 'file:../sdk-old';
 const NEW_PIN = 'file:../sdk-new';
+const PRETTIER_STUB = 'file:../prettier-stub';
 
 const sandboxes: Sandbox[] = [];
 function track(sb: Sandbox): Sandbox {
   sandboxes.push(sb);
   return sb;
 }
+/**
+ * Every package-manager call in this file inherits process.env (the sweep's
+ * `run` passes it through), so pointing bun's registry at a closed local port
+ * turns any registry fetch into a loud failure, with or without the Claude Code
+ * sandbox. Without it the file passed unsandboxed while it was really fetching
+ * prettier from registry.npmjs.org (home-base-ejsq2.10).
+ */
+const DEAD_REGISTRY = 'http://127.0.0.1:9/';
+const SAVED_REGISTRY = process.env.BUN_CONFIG_REGISTRY;
+beforeAll(() => {
+  process.env.BUN_CONFIG_REGISTRY = DEAD_REGISTRY;
+});
+afterAll(() => {
+  if (SAVED_REGISTRY == null) delete process.env.BUN_CONFIG_REGISTRY;
+  else process.env.BUN_CONFIG_REGISTRY = SAVED_REGISTRY;
+});
+
 const SAVED_PROMPTS = process.env.JSDK_PROMPTS_DIR;
 afterEach(() => {
   while (sandboxes.length > 0) sandboxes.pop()?.cleanup();
@@ -102,14 +124,21 @@ interface Fixture {
  * is how an older SDK left them), dead keys present, `bunx` scripts, old pin.
  */
 function enrolledRepo(sb: Sandbox): Fixture {
-  for (const [dir, version] of [
-    ['sdk-old', '0.0.1'],
-    ['sdk-new', '0.0.2'],
+  for (const [dir, name, version] of [
+    ['sdk-old', SDK_PKG, '0.0.1'],
+    ['sdk-new', SDK_PKG, '0.0.2'],
+    // A repo listing prettier-setup declares prettier. Left undeclared, the
+    // first run's prettier-setup writes `prettier: <PINNED>` without installing
+    // it, and the second run's pin write (`bun remove`) then resolves that
+    // semver spec from the registry (home-base-ejsq2.10). A `file:` stand-in
+    // resolves offline, as the `file:` SDK pins do. It has no `bin`, so no
+    // node_modules/.bin/prettier exists, exactly as before.
+    ['prettier-stub', 'prettier', '0.0.0-stub'],
   ] as const) {
     mkdirSync(join(sb.path, dir), {recursive: true});
     writeFileSync(
       join(sb.path, dir, 'package.json'),
-      `${JSON.stringify({name: SDK_PKG, version}, null, 2)}\n`,
+      `${JSON.stringify({name, version}, null, 2)}\n`,
     );
   }
 
@@ -126,7 +155,7 @@ function enrolledRepo(sb: Sandbox): Fixture {
     'package.json',
     `${JSON.stringify(
       {
-        devDependencies: {[SDK_PKG]: OLD_PIN},
+        devDependencies: {[SDK_PKG]: OLD_PIN, prettier: PRETTIER_STUB},
         name: 'fixture',
         scripts: {
           // The retired spellings a sweep is supposed to rewrite (D1).
@@ -161,7 +190,7 @@ function enrolledRepo(sb: Sandbox): Fixture {
       2,
     )}\n`,
   );
-  // Offline: a file: dependency never reaches a registry.
+  // Offline: both dependencies are file: specs, which never reach a registry.
   execFileSync('bun', ['install'], {cwd: root, stdio: 'ignore'});
   git(root, ['add', '-A']);
   git(root, ['commit', '-qm', 'enrolled, old style']);

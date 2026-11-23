@@ -21,10 +21,17 @@
  * label prefixes.
  *
  * THE ORDER OF ONE STEP. Back: no `continues:` is the root; two are a fork;
- * then a loop; then the limit; then the read. Forward: two `continued-by:`
- * are a fork; one is followed; none asks the reverse search, where a failed
- * search, two beads, or none (the newest) end the step; then a loop; then
- * the limit; then the read.
+ * then a loop; then the limit; then the read. Forward: one `continued-by:` is
+ * followed; two or more are each read, and the newest by creation is followed
+ * (below); none asks the reverse search, where a failed search, two beads, or
+ * none (the newest) end the step; then a loop; then the limit; then the read.
+ *
+ * TWO OR MORE SUCCESSORS (home-base-1vcgs D3). A session resumed after its
+ * successor S1 stopped, then handed off again, names S1 and S2. The newest
+ * successor is the one whose session bead was created last, and every chain
+ * reader takes it from here. Any successor that cannot be read, a creation
+ * time that is missing or unreadable, or two equal times keep the fork
+ * (`twoSuccessors`, with `why`): rule 7, a guess is never the newest.
  *
  * THE LIMIT. `limit` is the most beads a walk takes in one direction, the
  * start not counted, and `taken` how many it has taken so far. A reader that
@@ -47,6 +54,11 @@ import {
 
 /** What a step needs of a bead; a reader's own bead type carries more. */
 export interface StepBead {
+  /**
+   * When the bead was created (br's `created_at`), for D3's newest successor.
+   * Absent or null when the reader cannot say: two successors then stay a fork.
+   */
+  createdAt?: null | string;
   id: string;
   labels: readonly string[];
 }
@@ -172,8 +184,11 @@ export type ForwardStep<B> =
   | {id: string; kind: 'tooLong'; via: ForwardVia}
   /** Two or more beads carry `continues:<current>`. */
   | {ids: string[]; kind: 'twoContinuing'}
-  /** `current` names two or more `continued-by:` successors. */
-  | {ids: string[]; kind: 'twoSuccessors'}
+  /**
+   * `current` names two or more `continued-by:` successors and the newest
+   * cannot be established (D3); `why` says which read or time failed.
+   */
+  | {ids: string[]; kind: 'twoSuccessors'; why: string}
   | {
       id: string;
       kind: 'unreadable';
@@ -184,6 +199,52 @@ export type ForwardStep<B> =
 /** The successor `current`'s own labels name, before any read. */
 export function successorsOf(labels: readonly string[]): string[] {
   return labelsWith(labels, CONTINUED_BY_LABEL_PREFIX);
+}
+
+/** D3: the newest of several successors, or why it cannot be established. */
+export type NewestSuccessor<B> =
+  | {bead: B; id: string; kind: 'newest'}
+  | {kind: 'unknown'; why: string};
+
+/**
+ * D3, the one resolver: read every successor `ids` names and take the one
+ * created last. Every successor must be read and carry a readable creation
+ * time, and the newest time must be strictly the newest; otherwise unknown.
+ */
+export function newestSuccessor<B extends StepBead>(
+  ids: readonly string[],
+  readBead: (beadId: string) => StepRead<B>,
+): NewestSuccessor<B> {
+  let newest: {at: number; bead: B; id: string} | null = null;
+  let tie = false;
+  for (const id of ids) {
+    const read = readBead(id);
+    if (read.kind !== 'found') {
+      return {kind: 'unknown', why: `${id} could not be read: ${read.reason}`};
+    }
+    const {createdAt} = read.bead;
+    const at = createdAt == null ? Number.NaN : Date.parse(createdAt);
+    if (Number.isNaN(at)) {
+      return {
+        kind: 'unknown',
+        why: `${id} carries no readable creation time (${createdAt ?? 'none'})`,
+      };
+    }
+    if (newest == null || at > newest.at) {
+      newest = {at, bead: read.bead, id};
+      tie = false;
+    } else if (at === newest.at) {
+      tie = true;
+    }
+  }
+  if (newest == null) return {kind: 'unknown', why: 'no successor was named'};
+  if (tie) {
+    return {
+      kind: 'unknown',
+      why: `two of them were created at the same moment (${new Date(newest.at).toISOString()})`,
+    };
+  }
+  return {bead: newest.bead, id: newest.id, kind: 'newest'};
 }
 
 /**
@@ -204,8 +265,16 @@ export function stepForward<B extends StepBead, C extends StepBead>(
   let id: string;
   let via: ForwardVia;
   const [named] = successors;
-  if (successors.length > 1) return {ids: successors, kind: 'twoSuccessors'};
-  if (named != null) {
+  if (successors.length > 1) {
+    // D3: the newest by creation. Its read is reused below only for its id;
+    // the loop and limit checks and the read that follows are as for one.
+    const newest = newestSuccessor(successors, readers.readBead);
+    if (newest.kind === 'unknown') {
+      return {ids: successors, kind: 'twoSuccessors', why: newest.why};
+    }
+    id = newest.id;
+    via = 'continuedBy';
+  } else if (named != null) {
     id = named;
     via = 'continuedBy';
   } else {

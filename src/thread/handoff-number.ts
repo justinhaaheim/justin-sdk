@@ -35,6 +35,7 @@ import {stepBack} from './chain-step';
 import {MAYOR_SUCCESSOR_SENTENCE} from './mayor-sentence';
 import {KICKOFF_OPENING} from './respawn';
 import {
+  CONDUCTOR_ROLE_LABEL,
   CONTINUES_LABEL_PREFIX,
   HANDOFF_NUMBER_LABEL_PREFIX,
   MAYOR_ROLE_LABEL,
@@ -261,6 +262,44 @@ export function successorMarks(
 }
 
 /**
+ * home-base-eq5oy C3, C4: the role a link passes on, in the link's one write.
+ * The predecessor's mayor label always travels, and takes any conductor label
+ * off the successor in that write. Its conductor label travels unless the
+ * successor is already a mayor, because a session never carries both roles
+ * and the mayor wins.
+ *
+ * `newLabels` null means the successor's labels are not known. A mayor link
+ * then removes the conductor label anyway: br accepts removing a label the
+ * bead does not carry (exit 0, measured 2026-11-21 on br 0.1.37 and 0.7.6). A
+ * conductor link writes its label, and `thread mark --mayor` takes it off
+ * again if the session is a mayor.
+ */
+export function continuationRoleLabels(
+  oldLabels: readonly string[],
+  newLabels: null | readonly string[],
+): {add: string[]; remove: string[]} {
+  if (oldLabels.includes(MAYOR_ROLE_LABEL)) {
+    return {
+      add: [MAYOR_ROLE_LABEL],
+      remove:
+        newLabels == null || newLabels.includes(CONDUCTOR_ROLE_LABEL)
+          ? [CONDUCTOR_ROLE_LABEL]
+          : [],
+    };
+  }
+  if (oldLabels.includes(CONDUCTOR_ROLE_LABEL)) {
+    return {
+      add:
+        newLabels?.includes(MAYOR_ROLE_LABEL) === true
+          ? []
+          : [CONDUCTOR_ROLE_LABEL],
+      remove: [],
+    };
+  }
+  return {add: [], remove: []};
+}
+
+/**
  * D4: every label a link puts on the new session bead, so they land in one br
  * write. No number label when the number is unknown, so the reader shows
  * `[#?]`. If the new bead already holds a different number, the two labels read
@@ -271,8 +310,13 @@ export function successorMarks(
  * name handed out, and the knob decides only what shows). A new bead that was
  * named as its own chain before it linked then holds two names, which read as
  * none until the capture's self-heal keeps the chain's.
+ *
+ * home-base-eq5oy C3: the conductor label travels the same way, in the same
+ * place in the list. continuationRoleLabels says which role label is added.
  */
 export function continuationLabels(input: {
+  /** The successor's labels as last read, or null/absent when not known (C4). */
+  newLabels?: null | readonly string[];
   oldBeadId: string;
   oldLabels: readonly string[];
   oldNumber: HandoffNumber;
@@ -284,7 +328,7 @@ export function continuationLabels(input: {
     ...(oldNumber.kind === 'known'
       ? [`${HANDOFF_NUMBER_LABEL_PREFIX}${oldNumber.number + 1}`]
       : []),
-    ...(input.oldLabels.includes(MAYOR_ROLE_LABEL) ? [MAYOR_ROLE_LABEL] : []),
+    ...continuationRoleLabels(input.oldLabels, input.newLabels ?? null).add,
     ...(chain.kind === 'one' ? [chainNameLabel(chain.name)] : []),
   ];
 }

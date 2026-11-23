@@ -61,6 +61,9 @@ import {
 import {runRepoState, runSessionStart} from './session-start';
 import {runSetupEnv} from './setup-env-command';
 import {runSignal} from './signal';
+// By reference, like pre-commit-ts-check: the handler loads signing-guard.ts
+// on demand (home-base-di8c7.1).
+import {signingGuardCommand} from './signing-guard-command';
 import {runSkill} from './skill';
 import {INSTALL_PAYLOAD_OPTION, runSweep} from './sweep';
 import {runSyncRules} from './sync-rules';
@@ -534,7 +537,7 @@ void yargs(ARGV)
   )
   .command(
     'mac-build',
-    'Build this Expo app for the Mac as a "Designed for iPad" app, launch it through Xcode, and copy it out of DerivedData into ~/Applications/<Scheme>.app (a previous copy of the same app goes to the Trash). The variant, scheme and bundle id come from componentConfig["mac-build"] in justin-sdk.config.json; --variant <name> builds another variant named under its "variants" map. Run in the app repo, via its build:mac / mac / build:mac:no-launch / mac:install scripts, e.g. `bun run build:mac -- --variant development`.',
+    'Build this Expo app for the Mac as a "Designed for iPad" app, launch it through Xcode, and copy it out of DerivedData into ~/Applications/<Scheme>.app (a previous copy of the same app goes to the Trash). The variant, scheme and bundle id come from componentConfig["mac-build"] in justin-sdk.config.json; --variant <name> builds another variant named under its "variants" map. Run in the app repo, via its build:mac / mac / build:mac:no-launch / mac:install scripts, e.g. `bun run build:mac -- --variant development`. Each signing step (every xcodebuild run, and Xcode\'s own build) first waits for an unlocked screen, because one that starts while the screen is locked makes Xcode delete its Apple account (home-base-di8c7); JUSTIN_SDK_SIGNING_GUARD=off turns that off. `mac-build --problems` lists the known Mac build problems and their fixes.',
     (y) =>
       y
         .option('skip-prebuild', {
@@ -555,11 +558,23 @@ void yargs(ARGV)
             'Build nothing: copy the app Xcode last installed into ~/Applications (`bun run mac:install`).',
           type: 'boolean',
         })
+        .option('dialog-check', {
+          default: true,
+          describe:
+            'mac-build stops when Xcode shows a dialog, because while one is up Xcode may not answer and the workspace may not load (problem 8 in `--problems`): before it uses Xcode and after it rewrites ios/ (a modal window seen twice 3 s apart), and while the workspace loads (the same one for 30 s). --no-dialog-check turns all three off, for a window that is not a dialog: `bun run build:mac -- --no-dialog-check`.',
+          type: 'boolean',
+        })
         .option('variant', {
           describe:
             'Use this variant instead of the default: the top-level "variant" or a key of "variants" in componentConfig["mac-build"]. A name the config does not know is an error that shows the JSON to add, never a build of the default.',
           requiresArg: true,
           type: 'string',
+        })
+        .option('problems', {
+          default: false,
+          describe:
+            'Print the known Mac build problems, each with the message you see, its cause and its fix (docs/mac-build-problems.md in the SDK), and do nothing else. Takes no other option.',
+          type: 'boolean',
         })
         .check((argv) => {
           // yargs turns `--variant a --variant b` into an array and `--no-variant`
@@ -574,8 +589,10 @@ void yargs(ARGV)
       // from this file (tests/health-notices-cli.test.ts).
       const {runMacBuild} = await import('./mac-build');
       const exitCode = runMacBuild(process.cwd(), {
+        dialogCheck: argv['dialog-check'],
         installOnly: argv['install-only'],
         launch: argv.launch,
+        problems: argv.problems,
         skipPrebuild: argv['skip-prebuild'],
         variant: argv.variant ?? null,
       });
@@ -1300,6 +1317,7 @@ void yargs(ARGV)
   .command(worktreeRetireCommand)
   .command(preCommitBeadsExportCommand)
   .command(preCommitTsCheckCommand)
+  .command(signingGuardCommand)
   .demandCommand(1, 'Please specify a command')
   .strict()
   // The CLI reports its OWN failures (uxwc.5 F1). Without this, yargs' default

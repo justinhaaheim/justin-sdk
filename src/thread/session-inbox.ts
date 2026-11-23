@@ -63,6 +63,7 @@ import type {
 } from './before-restart-state';
 import type {UnfinishedSort} from './chain-fold';
 import type {ChainNamer} from './chain-names';
+import type {StepBead} from './chain-step';
 import type {HandoffStop} from './handoff-view';
 import type {InputDraft} from './input-drafts';
 import type {MessageLogRead} from './message-log';
@@ -77,7 +78,7 @@ import type {
 } from './session-card';
 import type {SessionSighting} from './session-index';
 import type {SessionModel, UncommittedDirt} from './session-model';
-import type {SessionStatus, StatusCounts} from './session-status';
+import type {SessionStatus, StatusCounts, StatusFacts} from './session-status';
 import type {
   UnattributedDirt,
   UntrackedRead,
@@ -173,7 +174,12 @@ import {
   newestLogAt,
 } from './session-model';
 import {sessionDisplayName} from './session-name';
-import {deriveStatus, statusCounts, statusFactsOf} from './session-status';
+import {
+  deriveStatus,
+  statusCounts,
+  statusFactsOf,
+  withNewestSuccessor,
+} from './session-status';
 import {
   carriesTestDataMarker,
   defaultDevRoot,
@@ -1019,11 +1025,44 @@ async function readInboxOnce(input: {
   // chain links name their sessions with it too.
   const chainNames = chainNamesKnob(cwd, env);
   const statuses = new Map<string, SessionStatus>();
-  const chainSessions = new Map<string, ChainSession>();
+  const chainModels = new Map<
+    string,
+    {model: SessionModel; status: SessionStatus}
+  >();
+  // home-base-1vcgs.1 F2: a bead naming two or more successors names the
+  // newest, read from the session beads this run loaded (no br read). A
+  // successor the run did not load leaves the newest unknown.
+  const loadedBeads = new Map<string, StepBead>();
+  for (const loaded of loads) {
+    const bead = loaded?.kind === 'loaded' ? loaded.model.beads.session : null;
+    if (bead == null) continue;
+    loadedBeads.set(bead.id, {
+      createdAt: bead.createdAt,
+      id: bead.id,
+      labels: bead.labels,
+    });
+  }
+  const factsBySession = new Map<string, StatusFacts>();
+  const factsOfModel = (model: SessionModel): StatusFacts => {
+    const known = factsBySession.get(model.sessionId);
+    if (known != null) return known;
+    const facts = withNewestSuccessor(
+      statusFactsOf(model),
+      model.beads.session?.labels ?? [],
+      (id) => {
+        const bead = loadedBeads.get(id);
+        return bead == null
+          ? {kind: 'notFound', reason: 'this inbox run did not load it'}
+          : {bead, kind: 'found'};
+      },
+    );
+    factsBySession.set(model.sessionId, facts);
+    return facts;
+  };
   for (const loaded of loads) {
     if (loaded?.kind !== 'loaded') continue;
     loadedLogs.set(loaded.model.sessionId, loaded.model.log);
-    const status = deriveStatus(statusFactsOf(loaded.model), {
+    const status = deriveStatus(factsOfModel(loaded.model), {
       asIfYielded: false,
       now,
     });
@@ -1031,18 +1070,9 @@ async function readInboxOnce(input: {
     const bead = loaded.model.beads.session;
     if (bead != null) {
       neighbors.set(bead.id, {labels: bead.labels, title: bead.title});
-      chainSessions.set(
-        bead.id,
-        chainSessionOf(loaded.model, status, {chainNames}),
-      );
+      chainModels.set(bead.id, {model: loaded.model, status});
     }
   }
-  const chainLookup: ChainLookup = (beadId) => {
-    const found = chainSessions.get(beadId);
-    return found == null
-      ? {kind: 'unknown', reason: 'it is not in this inbox'}
-      : {kind: 'found', session: found};
-  };
   // home-base-idnon: a bead that continues another and has no number label
   // gets its number walked from what this run already read; nothing written.
   const chainReaders = inboxChainReaders({
@@ -1051,6 +1081,32 @@ async function readInboxOnce(input: {
     exportIndexes: cache.exportIndexes,
     logs: loadedLogs,
   });
+  // A session's marks as its card heading shows them: home-base-l2ejg.11 names
+  // a chain with no `chain:` label from the registry, without a bead write.
+  const marksOf = (bead: {id: string; labels: readonly string[]}) =>
+    walkedSessionMarks(bead, chainReaders, {
+      chainNames,
+      namer: chainNames ? (input.chainNamer ?? null) : null,
+    });
+  // home-base-l2ejg.11.1: a successor becomes a chain link, named with those
+  // same marks, only when a Carried by line looks it up, so the registry is
+  // asked for no chain that no line shows.
+  const chainSessions = new Map<string, ChainSession>();
+  const chainLookup: ChainLookup = (beadId) => {
+    const known = chainSessions.get(beadId);
+    if (known != null) return {kind: 'found', session: known};
+    const entry = chainModels.get(beadId);
+    if (entry == null) {
+      return {kind: 'unknown', reason: 'it is not in this inbox'};
+    }
+    const bead = entry.model.beads.session;
+    const session = chainSessionOf(entry.model, entry.status, {
+      chainNames,
+      ...(bead == null ? {} : {marks: marksOf(bead)}),
+    });
+    chainSessions.set(beadId, session);
+    return {kind: 'found', session};
+  };
   for (const [position, candidate] of candidates.entries()) {
     const {activity, indexed, lastAssistantAt, old, sighting} = candidate;
     const loaded = loads[position];
@@ -1100,7 +1156,7 @@ async function readInboxOnce(input: {
       continue;
     }
     const {model} = loaded;
-    const facts = statusFactsOf(model);
+    const facts = factsOfModel(model);
     const status =
       statuses.get(model.sessionId) ??
       deriveStatus(facts, {asIfYielded: false, now});
@@ -1149,25 +1205,24 @@ async function readInboxOnce(input: {
       model.exportBehind?.title ??
       '⚠️ title unknown (the session bead could not be read)';
     const unreadable = unreadableOf(model);
+    const marks =
+      model.beads.session == null ? null : marksOf(model.beads.session);
     rows.push({
       beforeRestart: null,
       card: buildCard({
         action,
         age: ageOf(lastActivityAt, now),
         counts,
-        marks:
-          model.beads.session == null
-            ? null
-            : walkedSessionMarks(model.beads.session, chainReaders, {
-                chainNames,
-                namer: chainNames ? (input.chainNamer ?? null) : null,
-              }),
+        marks,
         model,
         neighbors,
         panes,
         requestStates: requestStatesOf({
           lookup: chainLookup,
-          session: chainSessionOf(model, status, {chainNames}),
+          session: chainSessionOf(model, status, {
+            chainNames,
+            ...(marks == null ? {} : {marks}),
+          }),
         }),
         section,
         status,

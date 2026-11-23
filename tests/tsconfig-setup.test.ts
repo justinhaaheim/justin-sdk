@@ -6,12 +6,13 @@
  * package.json directly so tests stay fast and offline.
  */
 
-import {afterEach, describe, expect, test} from 'bun:test';
+import {afterAll, afterEach, describe, expect, test} from 'bun:test';
 import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 
 import {PINNED} from '../src/pinned-versions';
-import {runTsconfigSetup} from '../src/tsconfig-setup';
+import {runTsconfigSetup as runTsconfigSetupReal} from '../src/tsconfig-setup';
+import {sharedSdkRemote} from './git-fixtures';
 import {createProjectSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
@@ -27,6 +28,23 @@ afterEach(() => {
     sb?.cleanup();
   }
 });
+
+const sdkRemote = sharedSdkRemote();
+afterAll(() => {
+  sdkRemote.cleanup();
+});
+
+/**
+ * home-base-ejsq2.5: base-setup, chained by the installer, verifies the SDK pin
+ * with a real `git ls-remote` against a LOCAL bare remote holding this SDK's
+ * tag (sharedSdkRemote), never github. With the default remote this file made
+ * 10 calls a run to github (343 ms each on average, 2026-11-14).
+ */
+function runTsconfigSetup(
+  options: Parameters<typeof runTsconfigSetupReal>[0] = {},
+): Promise<number> {
+  return runTsconfigSetupReal({sdkRepoUrl: sdkRemote.url(), ...options});
+}
 
 describe('tsconfig-setup', () => {
   test('fresh project: installs tsconfig + devDeps + script, and registers NOTHING', async () => {

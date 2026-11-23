@@ -23,7 +23,7 @@ import {bdContext, isExportOnlyFailure} from '../src/thread/bd';
 import {writeReportToBd} from '../src/thread/report';
 import {validateThreadReport} from '../src/thread/schema';
 import {createFakeBd} from './fake-bd';
-import {examplePayload} from './thread-schema.test';
+import {examplePayload} from './thread-schema-example';
 
 const SESSION = 'sess-export-unstaged';
 

@@ -6,12 +6,13 @@
  * offline and fast.
  */
 
-import {afterEach, describe, expect, test} from 'bun:test';
+import {afterAll, afterEach, describe, expect, test} from 'bun:test';
 import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 
-import {runEslintSetup} from '../src/eslint-setup';
+import {runEslintSetup as runEslintSetupReal} from '../src/eslint-setup';
 import {PINNED, PINNED_GITHUB} from '../src/pinned-versions';
+import {sharedSdkRemote} from './git-fixtures';
 import {createProjectSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
@@ -27,6 +28,23 @@ afterEach(() => {
     sb?.cleanup();
   }
 });
+
+const sdkRemote = sharedSdkRemote();
+afterAll(() => {
+  sdkRemote.cleanup();
+});
+
+/**
+ * home-base-ejsq2.5: base-setup, chained by the installer, verifies the SDK pin
+ * with a real `git ls-remote` against a LOCAL bare remote holding this SDK's
+ * tag (sharedSdkRemote), never github. With the default remote this file made
+ * 14 calls a run to github (343 ms each on average, 2026-11-14).
+ */
+function runEslintSetup(
+  options: Parameters<typeof runEslintSetupReal>[0] = {},
+): Promise<number> {
+  return runEslintSetupReal({sdkRepoUrl: sdkRemote.url(), ...options});
+}
 
 describe('eslint-setup', () => {
   test('fresh project: writes all files, scripts, and config', async () => {

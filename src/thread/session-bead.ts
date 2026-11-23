@@ -92,6 +92,35 @@ export const HANDOFF_NUMBER_LABEL_PREFIX = 'handoff-number:';
  */
 export const MAYOR_ROLE_LABEL = 'session-role:mayor';
 /**
+ * A conductor session (home-base-eq5oy C1), set by `thread mark --conductor`
+ * from the conductor skill's Stop hook and passed on by a link as the mayor
+ * label is (C3). It changes no session name (out of scope there): only the
+ * handoff block's reading line reads it (C2). A session never carries both
+ * roles, and the mayor wins (C4): see sessionRoleLabelsAfter.
+ */
+export const CONDUCTOR_ROLE_LABEL = 'session-role:conductor';
+
+/**
+ * home-base-eq5oy C4: the role labels to add and to remove so a bead that
+ * holds `labels` ends up with `wanted` and never with both roles. The mayor
+ * wins: asking for the conductor role on a mayor adds nothing, and the mayor
+ * role takes the conductor label away in the same write.
+ */
+export function sessionRoleLabelsAfter(
+  labels: readonly string[],
+  wanted: 'conductor' | 'mayor',
+): {add: string[]; remove: string[]} {
+  const mayor = labels.includes(MAYOR_ROLE_LABEL);
+  const conductor = labels.includes(CONDUCTOR_ROLE_LABEL);
+  if (wanted === 'mayor') {
+    return {
+      add: mayor ? [] : [MAYOR_ROLE_LABEL],
+      remove: conductor ? [CONDUCTOR_ROLE_LABEL] : [],
+    };
+  }
+  return {add: mayor || conductor ? [] : [CONDUCTOR_ROLE_LABEL], remove: []};
+}
+/**
  * The name of the chain a session belongs to (home-base-l2ejg.11, D5 in
  * home-base-l2ejg.3): `chain:Moe`, or `chain:Moe_II` for a later generation.
  * The capture child writes it on the chain's sessions (healChainName in

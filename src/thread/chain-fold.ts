@@ -26,6 +26,7 @@
 
 import type {ReopenKey, ReopenSignals, ReopenTier} from './reopen-order';
 
+import {newestSuccessor} from './chain-step';
 import {compareReopen, reopenTier} from './reopen-order';
 import {
   CONTINUED_BY_LABEL_PREFIX,
@@ -37,6 +38,12 @@ import {isOpen} from './session-status';
 export interface ChainLinks {
   /** The session bead; null for an untracked session (it is in no chain). */
   beadId: string | null;
+  /**
+   * When the session bead was created (br's `created_at`), so a predecessor
+   * that names two or more successors folds into the newest (home-base-1vcgs.1
+   * F1). Absent or null: unknown, and that predecessor folds as before.
+   */
+  createdAt?: null | string;
   /** The session bead's labels; null when they were not loaded. */
   labels: readonly string[] | null;
 }
@@ -151,6 +158,15 @@ export interface ChainGroup<T> {
  * walking predecessors (either half of a link) through folded sessions only,
  * so a predecessor the fold keeps as a row of its own stays one. Each session
  * is in one group: the first head, in the input order, that reaches it.
+ *
+ * home-base-1vcgs.1 F1: a folded session that names two or more successors
+ * (a session resumed after its successor stopped, then handed off again)
+ * joins only the group that reaches it through its NEWEST successor, by
+ * chain-step.ts's one rule (`newestSuccessor`: created last, strictly).
+ * When the newest cannot be established (a creation time missing or
+ * unreadable, or two equal), it joins the first head that reaches it, as
+ * before.
+ *
  * `unplaced`: folded sessions no head reaches (a handoff loop), named so
  * nothing is dropped silently.
  */
@@ -162,6 +178,26 @@ export function chainGroups<T>(
   const listed = new Set(index.byBead.keys());
   const folded = (item: T): boolean =>
     foldVerdict(linksOf(item).labels, listed).kind === 'folded';
+  // F1: only a session naming two or more successors pays for this, and it
+  // reads the listed rows, never br.
+  const newestOf = (item: T): null | string => {
+    const successors = handedOffToOf(linksOf(item).labels);
+    if (successors.length < 2) return null;
+    const newest = newestSuccessor(successors, (id) => {
+      const row = index.byBead.get(id);
+      if (row == null) return {kind: 'notFound', reason: 'it is not listed'};
+      const links = linksOf(row);
+      return {
+        bead: {
+          createdAt: links.createdAt ?? null,
+          id,
+          labels: links.labels ?? [],
+        },
+        kind: 'found',
+      };
+    });
+    return newest.kind === 'newest' ? newest.id : null;
+  };
   const placed = new Set<T>();
   const groups: ChainGroup<T>[] = [];
   for (const head of items) {
@@ -171,21 +207,24 @@ export function chainGroups<T>(
     const outside: string[] = [];
     const start = linksOf(head).beadId;
     const seen = new Set<string>(start == null ? [] : [start]);
-    const queue = [
-      ...(start == null ? [] : (index.predecessors.get(start) ?? [])),
-    ];
+    // Each entry is a predecessor and the session the walk reached it from.
+    const predecessorsOf = (bead: string): {id: string; via: string}[] =>
+      [...(index.predecessors.get(bead) ?? [])].map((id) => ({id, via: bead}));
+    const queue = start == null ? [] : predecessorsOf(start);
     for (let next = queue.shift(); next != null; next = queue.shift()) {
-      if (seen.has(next)) continue;
-      seen.add(next);
-      const found = index.byBead.get(next);
+      if (seen.has(next.id)) continue;
+      seen.add(next.id);
+      const found = index.byBead.get(next.id);
       if (found == null) {
-        outside.push(next);
+        outside.push(next.id);
         continue;
       }
       if (!folded(found) || placed.has(found)) continue;
+      const newest = newestOf(found);
+      if (newest != null && newest !== next.via) continue;
       placed.add(found);
       members.push(found);
-      queue.push(...(index.predecessors.get(next) ?? []));
+      queue.push(...predecessorsOf(next.id));
     }
     groups.push({head, members, outside});
   }

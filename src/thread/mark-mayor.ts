@@ -4,6 +4,20 @@
  * follow-up, so cmux shows `[MAYOR]` at once. The number is never an argument and
  * neither is the session: it is always the session this runs in.
  *
+ * `thread mark --conductor` (home-base-eq5oy C1) is the same command for
+ * `session-role:conductor`, and shares every step here. Two differences:
+ * - No workspace name follow-up: no session name shows a conductor mark
+ *   (session-name.ts is unchanged, out of scope there), so it has nothing to
+ *   show.
+ * - With --hook it prints nothing and exits 0 on every path (runThreadMark).
+ *   It runs from the conductor skill's Stop hook in every repo a conductor
+ *   works in, so a failure must never show as a hook error. The hook runs again
+ *   at every Stop, which is the retry.
+ *
+ * ONE ROLE (C4). A session never carries both roles, and the mayor wins: the
+ * conductor mark on a mayor writes nothing and says so, and the mayor mark
+ * removes a conductor label in its one write (sessionRoleLabelsAfter).
+ *
  * IDEMPOTENT. A bead that already has the label gets no write. A hook retries at
  * every Stop, so with --hook it also skips the name follow-up: one br read.
  *
@@ -11,6 +25,7 @@
  * (15.7 s in one measured run, pkg/justin-sdk/CLAUDE.md), so this can run first.
  * It then exits 1 and says so. It never claims success, and it stays exit 1 rather
  * than exit 2 because exit 2 from a Stop hook would stop the turn from ending.
+ * (`--conductor --hook` exits 0 here too, and prints nothing: C1.)
  *
  * --hook reads the hook payload from stdin. A payload with `agent_id` came from a
  * subagent, whose environment equals its parent's (pkg/justin-sdk/CLAUDE.md), and
@@ -24,9 +39,23 @@ import type {EnvLike} from './paths';
 import {readFileSync} from 'node:fs';
 
 import {brUpdate, describeBrFailed, saysBeadsLocked} from '../beads/br';
-import {MAYOR_ROLE_LABEL} from './session-bead';
+import {
+  CONDUCTOR_ROLE_LABEL,
+  MAYOR_ROLE_LABEL,
+  sessionRoleLabelsAfter,
+} from './session-bead';
 import {selectSession, sessionBeadsKnob} from './session-select';
 import {workspaceNameFollowUp} from './workspace-name-session';
+
+export type SessionRole = 'conductor' | 'mayor';
+
+const ROLE_LABEL: Readonly<Record<SessionRole, string>> = {
+  conductor: CONDUCTOR_ROLE_LABEL,
+  mayor: MAYOR_ROLE_LABEL,
+};
+
+/** C4's one sentence, wherever the mayor wins. */
+const MAYOR_WINS = 'a session never carries both roles, and the mayor wins';
 
 export interface MarkMayorOptions {
   cwd?: string;
@@ -39,15 +68,35 @@ export interface MarkMayorOptions {
   update?: typeof brUpdate;
 }
 
-export type MarkMayorOutcome =
-  /** The bead already had the label: nothing was written. */
-  | {beadId: string; kind: 'already'; workspaceNote: null | string}
-  | {beadId: string; kind: 'marked'; workspaceNote: null | string}
+export type MarkRoleOutcome =
+  /** The bead already had the label, and no other role: nothing was written. */
+  | {
+      beadId: string;
+      kind: 'already';
+      role: SessionRole;
+      workspaceNote: null | string;
+    }
+  /**
+   * One br write. `added`: the role label, or nothing when it was there.
+   * `removed`: the conductor label a mayor took off (C4).
+   */
+  | {
+      added: string[];
+      beadId: string;
+      kind: 'marked';
+      removed: string[];
+      role: SessionRole;
+      workspaceNote: null | string;
+    }
+  /** C4: the conductor mark, on a mayor session. Nothing was written. */
+  | {beadId: string; kind: 'mayorWins'}
   /** `--hook` and the payload names a subagent: nothing was read or written. */
   | {agentId: string; kind: 'subagent'}
   /** The bead is not there yet, or not known: nothing was written. */
   | {kind: 'noBead'; reason: string}
   | {kind: 'failed'; reason: string};
+
+export type MarkMayorOutcome = MarkRoleOutcome;
 
 function nonEmptyText(value: unknown): null | string {
   return typeof value === 'string' && value.trim() !== '' ? value : null;
@@ -82,10 +131,11 @@ function readHookPayload(
   };
 }
 
-/** The whole command. Prints nothing and never exits. */
-export async function markMayor(
+/** The whole command, for either role. Prints nothing and never exits. */
+export async function markRole(
+  role: SessionRole,
   options: MarkMayorOptions = {},
-): Promise<MarkMayorOutcome> {
+): Promise<MarkRoleOutcome> {
   const env = options.env ?? process.env;
   const cwd = options.cwd ?? process.cwd();
   const followUp = options.followUp ?? workspaceNameFollowUp;
@@ -123,50 +173,95 @@ export async function markMayor(
   }
   const {session} = selected;
   const beadId = session.bead.id;
-  const already = session.bead.labels.includes(MAYOR_ROLE_LABEL);
+  const {labels} = session.bead;
+  if (role === 'conductor' && labels.includes(MAYOR_ROLE_LABEL)) {
+    return {beadId, kind: 'mayorWins'};
+  }
+  const change = sessionRoleLabelsAfter(labels, role);
+  const already = change.add.length === 0 && change.remove.length === 0;
   if (!already) {
     const written = (options.update ?? brUpdate)(
       {db: session.db, env},
       beadId,
       {
-        addLabels: [MAYOR_ROLE_LABEL],
+        addLabels: change.add,
+        ...(change.remove.length > 0 ? {removeLabels: change.remove} : {}),
       },
     );
     if (written.kind === 'failed') {
       return {
         kind: 'failed',
-        reason: `${beadId} was NOT labelled ${MAYOR_ROLE_LABEL}: ${describeBrFailed(written)}`,
+        reason: `${beadId} was NOT labelled ${ROLE_LABEL[role]}: ${describeBrFailed(written)}`,
       };
     }
   }
   // A hook repeats at every Stop, and the capture child syncs the names then.
+  // C1: no name shows the conductor role, so there is nothing to sync for it.
   const workspaceNote =
-    already && options.hookPayload !== undefined
+    role === 'conductor' || (already && options.hookPayload !== undefined)
       ? null
       : await followUp({cwd, env, sessionId: session.sessionId});
-  return {beadId, kind: already ? 'already' : 'marked', workspaceNote};
+  return already
+    ? {beadId, kind: 'already', role, workspaceNote}
+    : {
+        added: change.add,
+        beadId,
+        kind: 'marked',
+        removed: change.remove,
+        role,
+        workspaceNote,
+      };
+}
+
+export function markMayor(
+  options: MarkMayorOptions = {},
+): Promise<MarkRoleOutcome> {
+  return markRole('mayor', options);
+}
+
+export function markConductor(
+  options: MarkMayorOptions = {},
+): Promise<MarkRoleOutcome> {
+  return markRole('conductor', options);
 }
 
 /** What the command prints, and its exit code: 0 the mark holds or a subagent, else 1. */
-export function describeMarkMayor(outcome: MarkMayorOutcome): {
+export function describeMarkMayor(outcome: MarkRoleOutcome): {
   exitCode: 0 | 1;
   lines: string[];
 } {
   switch (outcome.kind) {
     case 'marked':
     case 'already': {
+      const label = ROLE_LABEL[outcome.role];
       const first =
-        outcome.kind === 'marked'
-          ? `session ${outcome.beadId} is now a mayor session: labelled ${MAYOR_ROLE_LABEL}`
-          : `session ${outcome.beadId} is already a mayor session: nothing written`;
+        outcome.kind === 'already'
+          ? `session ${outcome.beadId} is already a ${outcome.role} session: nothing written`
+          : outcome.added.length === 0
+            ? `session ${outcome.beadId} is already a ${outcome.role} session: labelled ${label}`
+            : `session ${outcome.beadId} is now a ${outcome.role} session: labelled ${label}`;
+      const removed =
+        outcome.kind === 'marked' && outcome.removed.length > 0
+          ? [`  removed ${outcome.removed.join(', ')}: ${MAYOR_WINS}`]
+          : [];
       return {
         exitCode: 0,
-        lines:
-          outcome.workspaceNote == null
-            ? [first]
-            : [first, `  ${outcome.workspaceNote}`],
+        lines: [
+          first,
+          ...removed,
+          ...(outcome.workspaceNote == null
+            ? []
+            : [`  ${outcome.workspaceNote}`]),
+        ],
       };
     }
+    case 'mayorWins':
+      return {
+        exitCode: 0,
+        lines: [
+          `session ${outcome.beadId} is a mayor session, so ${CONDUCTOR_ROLE_LABEL} was NOT written: ${MAYOR_WINS}`,
+        ],
+      };
     case 'subagent':
       return {
         exitCode: 0,
@@ -191,13 +286,20 @@ export function describeMarkMayor(outcome: MarkMayorOutcome): {
   }
 }
 
+function printed(result: {exitCode: 0 | 1; lines: string[]}): number {
+  const write = result.exitCode === 0 ? console.log : console.error;
+  for (const line of result.lines) write(line);
+  return result.exitCode;
+}
+
 export async function runThreadMark(input: {
+  conductor: boolean;
   hook: boolean;
   mayor: boolean;
 }): Promise<number> {
-  if (!input.mayor) {
+  if (!input.mayor && !input.conductor) {
     console.error(
-      'thread mark: refused: name the mark. --mayor is the only one. Nothing was written.',
+      'thread mark: refused: name the mark: --mayor or --conductor. Nothing was written.',
     );
     return 2;
   }
@@ -209,10 +311,26 @@ export async function runThreadMark(input: {
       hookPayload = null;
     }
   }
-  const {exitCode, lines} = describeMarkMayor(
-    await markMayor(hookPayload === undefined ? {} : {hookPayload}),
-  );
-  const write = exitCode === 0 ? console.log : console.error;
-  for (const line of lines) write(line);
-  return exitCode;
+  const options = hookPayload === undefined ? {} : {hookPayload};
+  if (!input.mayor) {
+    if (input.hook) {
+      // C1: the conductor skill's Stop hook prints nothing and exits 0 on
+      // every path, a throw included. The next Stop tries again.
+      try {
+        await markConductor(options);
+      } catch {
+        // Nothing: see above.
+      }
+      return 0;
+    }
+    return printed(describeMarkMayor(await markConductor(options)));
+  }
+  const result = describeMarkMayor(await markMayor(options));
+  if (input.conductor && !input.hook) {
+    // C4: both named, and the mayor wins.
+    result.lines.push(
+      `thread mark: --conductor ignored: ${CONDUCTOR_ROLE_LABEL} was NOT written: ${MAYOR_WINS}`,
+    );
+  }
+  return printed(result);
 }

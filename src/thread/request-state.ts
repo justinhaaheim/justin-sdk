@@ -22,11 +22,13 @@
  */
 
 import type {SessionModel} from './session-model';
+import type {SessionMarks} from './session-name';
 import type {SessionStatus} from './session-status';
 import type {RequestNode, TreeIssue} from './session-tree';
 
 import {parseInstant} from './answer-store';
 import {ARCHIVED_PREFIX, oneLine, parseAsk} from './ask-format';
+import {newestSuccessor, successorsOf} from './chain-step';
 import {exportBehindWords} from './export-behind';
 import {questionIdOf, shortIdText} from './question-ids';
 import {CONTINUED_BY_LABEL_PREFIX, cutOnWord} from './session-bead';
@@ -349,6 +351,12 @@ export function requestStateLine(input: {
 
 /** One session of a handoff chain, as the state lines read it. */
 export interface ChainSession {
+  /**
+   * When the session bead was created (br's `created_at`), so a predecessor
+   * that names two or more successors follows the newest (home-base-1vcgs.2).
+   * Absent or null when unknown: the newest is then unknown too.
+   */
+  createdAt?: null | string;
   /** The session bead's labels (`continued-by:` names the successor). */
   labels: readonly string[];
   /** The repo's stage ladder. */
@@ -366,6 +374,12 @@ export interface ChainSession {
  * (home-base-l2ejg.11): on, the name reads `[TAG][Moe-2] <title>` as every
  * other surface names it; off, `[TAG][#2] <title>`. Never read from config
  * here: this module stays pure.
+ *
+ * home-base-l2ejg.11.1: `marks` are the session's marks as the caller worked
+ * them out with walkedSessionMarks, the lookup the dashboard headings use, so
+ * a bead with no `chain:` label is named from the registry there too and the
+ * Carried by line names the chain as its heading does. Absent: the labels
+ * alone (sessionMarksOf), as before.
  */
 export function chainSessionOf(
   model: Pick<
@@ -373,7 +387,7 @@ export function chainSessionOf(
     'beads' | 'exportBehind' | 'repoTag' | 'sessionId' | 'stages'
   >,
   status: SessionStatus,
-  options: {chainNames: boolean},
+  options: {chainNames: boolean; marks?: SessionMarks},
 ): ChainSession {
   // `thread status` runs this in every session: an odd or partial model (no
   // ladder, no question list) gives empty lists, never a throw.
@@ -381,12 +395,13 @@ export function chainSessionOf(
   const labels = Array.isArray(bead?.labels) ? bead.labels : [];
   const title = bead?.title ?? model.exportBehind?.title ?? model.sessionId;
   return {
+    createdAt: bead?.createdAt ?? null,
     labels,
     ladder: Array.isArray(model.stages) ? model.stages : [],
     name: sessionDisplayName(
       model.repoTag,
       title,
-      sessionMarksOf(labels, {chainNames: options.chainNames}),
+      options.marks ?? sessionMarksOf(labels, {chainNames: options.chainNames}),
     ),
     openQuestions: Array.isArray(model.beads.questions)
       ? model.beads.questions.filter(isOpen)
@@ -414,10 +429,44 @@ export function successorBeadOf(labels: readonly string[]): string | null {
 }
 
 /**
+ * home-base-1vcgs.2: the successor a state line follows. One `continued-by:`
+ * is that one. Two or more (a session resumed after its successor stopped,
+ * then handed off again) are each looked up through `lookup`, and the newest
+ * is followed, by chain-step.ts's one rule (`newestSuccessor`: created last,
+ * strictly). br sorts labels, so the first label is the smallest bead id, not
+ * the oldest session. When the newest cannot be established (a successor not
+ * looked up, a creation time missing or unreadable, two equal), the first
+ * label is followed, as before this rule: the line then keeps the words it
+ * had, and claims no newest it could not read.
+ */
+export function successorToFollow(
+  labels: readonly string[],
+  lookup: ChainLookup,
+): string | null {
+  const named = successorsOf(labels);
+  if (named.length < 2) return successorBeadOf(labels);
+  const newest = newestSuccessor(named, (id) => {
+    const found = lookup(id);
+    if (found.kind !== 'found') return {kind: 'failed', reason: found.reason};
+    return {
+      bead: {
+        createdAt: found.session.createdAt ?? null,
+        id,
+        labels: found.session.labels,
+      },
+      kind: 'found',
+    };
+  });
+  return newest.kind === 'newest' ? newest.id : successorBeadOf(labels);
+}
+
+/**
  * The state line of a request held by `session`, following `continued-by:`
  * through `lookup`: when the successor holds the request too (the pickup
  * gave it the successor's `sid:` label), the line is the successor's, and so
- * on down the chain. A loop, or a chain longer than `limit`, is unknown.
+ * on down the chain. A loop, or a chain longer than `limit`, is unknown. A
+ * session that names two or more successors follows the newest
+ * (`successorToFollow`, home-base-1vcgs.2).
  */
 export function chainRequestState(input: {
   limit?: number;
@@ -432,9 +481,12 @@ export function chainRequestState(input: {
     node: RequestNode,
     depth: number,
   ): RequestStateLine => {
-    const successor = successorBeadOf(session.labels);
+    // Only an open request is followed, so a closed one looks nothing up.
+    const successor = isOpen(node.request)
+      ? successorToFollow(session.labels, input.lookup)
+      : null;
     let carrier: RequestCarrier | null = null;
-    if (successor != null && isOpen(node.request)) {
+    if (successor != null) {
       if (seen.has(successor) || depth >= limit) {
         carrier = {
           kind: 'unknown',

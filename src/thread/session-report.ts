@@ -38,8 +38,10 @@ import type {MessageLine} from './message-log';
 import type {MessageQuestions} from './message-questions';
 import type {ClaudeMessageInput, PartOneView, Piece} from './part-one';
 import type {EnvLike} from './paths';
+import type {QuestionMoveReaders, QuestionMoves} from './question-moved';
 import type {RelatedEpics} from './related-epics';
 import type {ReportDelta, SnapshotBlock} from './report-delta';
+import type {CodeReviewsLoad} from './review-findings';
 import type {ActionLine, OptionalLine} from './session-card';
 import type {CreatedBeads} from './session-created';
 import type {Measured, SessionModel} from './session-model';
@@ -70,6 +72,7 @@ import {writeStdout} from '../write-stdout';
 import {parseInstant} from './answer-store';
 import {readCaptureLockHolder} from './capture-lock';
 import {registryChainNamer} from './chain-names';
+import {successorsOf} from './chain-step';
 import {realChainWalkReaders} from './chain-walk';
 import {readBeadFromDb} from './export-behind';
 import {
@@ -108,6 +111,11 @@ import {
 } from './part-one';
 import {threadsBeadsDir} from './paths';
 import {assignMissingQuestionIds} from './question-id-assign';
+import {
+  checkQuestionMoves,
+  questionMoveMarks,
+  realQuestionMoveReaders,
+} from './question-moved';
 import {findRelatedEpics, renderRelatedEpics} from './related-epics';
 import {
   blockShownIn,
@@ -124,10 +132,19 @@ import {
   type RequestStateLine,
   requestStatesOf,
   successorBeadOf,
+  successorToFollow,
 } from './request-state';
+import {
+  chainPredecessors,
+  loadCodeReviews,
+  reviewMarks,
+} from './review-findings';
 import {deriveAction, optionalLine} from './session-card';
 import {loadCreatedBeads} from './session-created';
-import {realHandoffNumberReaders} from './session-handoff';
+import {
+  realHandoffNumberReaders,
+  realSuccessorBeadReader,
+} from './session-handoff';
 import {readSessionIndex, sessionBeadSighting} from './session-index';
 import {
   lastAssistantLine,
@@ -144,6 +161,7 @@ import {
   statusCounts,
   statusFactsOf,
   whatToMark,
+  withNewestSuccessor,
 } from './session-status';
 import {normalizeText, saveStatusBlock} from './trim-guard';
 
@@ -206,6 +224,8 @@ export type ReportLoad =
   | {
       /** The dashboard's "You need to" line (deriveAction), for Part 1. */
       action: ActionLine;
+      /** home-base-g22jt.7: review-gate reviews of this session, read now. */
+      codeReviews: CodeReviewsLoad;
       /**
        * componentConfig.thread.compactQuestions (home-base-1rxt0.4 D3):
        * unchanged P2 to P4 questions take one line in `thread status`.
@@ -338,6 +358,11 @@ function successorSessionIdOf(
  * (`continued-by:`), one load per link, at most CHAIN_STATE_LIMIT links. Never
  * throws: a successor that cannot be found or loaded is recorded with why,
  * and its requests' lines say so.
+ *
+ * home-base-1vcgs.2: a link that names two or more successors loads each of
+ * them, and the walk goes on from the one the state lines follow
+ * (`successorToFollow`: the newest, or the first label when the newest is
+ * unknown), so the lines and this walk pick the same successor.
  */
 async function successorChainOf(
   model: SessionModel,
@@ -350,17 +375,25 @@ async function successorChainOf(
   },
 ): Promise<ChainLookup> {
   const found = new Map<string, ReturnType<ChainLookup>>();
+  const lookup: ChainLookup = (beadId) =>
+    found.get(beadId) ?? {
+      kind: 'unknown',
+      reason: 'the next session was not looked up',
+    };
   let labels: readonly string[] = model.beads.session?.labels ?? [];
-  for (let hop = 0; hop < CHAIN_STATE_LIMIT; hop += 1) {
-    const beadId = successorBeadOf(labels);
-    if (beadId == null || found.has(beadId)) break;
+  // home-base-l2ejg.11.1: each successor is named as Part 1 names this
+  // session (loadForReport): its label, or else the registry, looked up only.
+  const namer = input.chainNames
+    ? registryChainNamer(input.env, {assign: false})
+    : null;
+  /** One successor as a chain link, or why it is unknown. Never throws. */
+  const load = async (beadId: string): Promise<ReturnType<ChainLookup>> => {
     const sessionId = successorSessionIdOf(beadId, input.env);
     if (sessionId == null) {
-      found.set(beadId, {
+      return {
         kind: 'unknown',
         reason: 'the sessions index names no session for it',
-      });
-      break;
+      };
     }
     try {
       const loaded = await loadSession({
@@ -370,36 +403,57 @@ async function successorChainOf(
         sessionIdOption: sessionId,
       });
       if (loaded.kind !== 'loaded') {
-        found.set(beadId, {
+        return {
           kind: 'unknown',
           reason: loaded.kind === 'unreadable' ? loaded.detail : loaded.reason,
-        });
-        break;
+        };
       }
       const status = deriveStatus(statusFactsOf(loaded.model), {
         asIfYielded: false,
         now: input.now,
       });
-      found.set(beadId, {
+      const bead = loaded.model.beads.session;
+      return {
         kind: 'found',
         session: chainSessionOf(loaded.model, status, {
           chainNames: input.chainNames,
+          ...(bead == null
+            ? {}
+            : {
+                marks: walkedSessionMarks(
+                  bead,
+                  realHandoffNumberReaders({
+                    env: input.env,
+                    fallbackDbs: [join(bead.beadsDir, 'beads.db')],
+                  }),
+                  {chainNames: input.chainNames, namer},
+                ),
+              }),
         }),
-      });
-      labels = loaded.model.beads.session?.labels ?? [];
+      };
     } catch (error) {
-      found.set(beadId, {
+      return {
         kind: 'unknown',
         reason: `it could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
-      });
-      break;
+      };
     }
+  };
+  const followed = new Set<string>();
+  for (let hop = 0; hop < CHAIN_STATE_LIMIT; hop += 1) {
+    const named = successorsOf(labels);
+    const first = successorBeadOf(labels);
+    const toLoad = named.length > 1 ? named : first == null ? [] : [first];
+    for (const beadId of toLoad) {
+      if (!found.has(beadId)) found.set(beadId, await load(beadId));
+    }
+    const next = successorToFollow(labels, lookup);
+    if (next == null || followed.has(next)) break;
+    followed.add(next);
+    const entry = found.get(next);
+    if (entry?.kind !== 'found') break;
+    labels = entry.session.labels;
   }
-  return (beadId) =>
-    found.get(beadId) ?? {
-      kind: 'unknown',
-      reason: 'the next session was not looked up',
-    };
+  return lookup;
 }
 
 /**
@@ -475,7 +529,18 @@ async function loadForReport(input: {
   });
   if (loaded.kind !== 'loaded') return loaded;
   const {model} = loaded;
-  const facts = statusFactsOf(model);
+  // home-base-1vcgs.1 F2: with two or more successors, the newest.
+  const facts = withNewestSuccessor(
+    statusFactsOf(model),
+    model.beads.session?.labels ?? [],
+    realSuccessorBeadReader({
+      env: input.env,
+      fallbackDbs:
+        model.beads.session == null
+          ? []
+          : [join(model.beads.session.beadsDir, 'beads.db')],
+    }),
+  );
   const status = deriveStatus(facts, {
     asIfYielded: input.asIfYielded,
     now: input.now,
@@ -522,6 +587,12 @@ async function loadForReport(input: {
       status,
       successorSessionId: successorSessionIdOf(facts.successor, input.env),
     }),
+    // home-base-g22jt.7 (D16): never throws; a failure is one line.
+    codeReviews: await loadCodeReviews({
+      env: input.env,
+      predecessors: chainPredecessors(model.beads.session, input),
+      sessionId: model.sessionId,
+    }),
     compactQuestions: knob.compactQuestions,
     counts,
     created,
@@ -550,7 +621,10 @@ async function loadForReport(input: {
     }),
     requestStates: requestStatesOf({
       lookup,
-      session: chainSessionOf(model, status, {chainNames: knob.chainNames}),
+      session: chainSessionOf(model, status, {
+        chainNames: knob.chainNames,
+        marks,
+      }),
     }),
     shortLabels: knob.shortLabels,
     status,
@@ -597,6 +671,11 @@ export interface ThreadStatusOptions extends CommonOptions {
    * Null or absent: no such section.
    */
   message?: string | null;
+  /**
+   * home-base-5uu56.2.5: the readers of the moved-question check; absent =
+   * the real ones (the sessions index and br). For tests.
+   */
+  questionMoveReaders?: QuestionMoveReaders;
   /**
    * `--report-file <path>` (home-base-88y8m D2): also write the full report,
    * the block alone, to this path (relative to `cwd`). Null or absent: none.
@@ -1161,6 +1240,7 @@ function statusPartOneView(
   return partOneView({
     action: load.action,
     changesOnly: options.changesOnly === true,
+    codeReviews: load.codeReviews,
     counts: load.counts,
     delta: options.delta ?? null,
     jobs: load.jobHealth,
@@ -1195,20 +1275,30 @@ export function renderThreadStatus(
     now: Date;
     /** home-base-1rxt0.4 D4: why some questions got no id in this run. */
     questionIdProblems?: readonly string[];
+    /**
+     * home-base-5uu56.2.5: the open questions whose named work moved after
+     * they were filed (checkQuestionMoves). Absent or null: not checked.
+     */
+    questionMoves?: null | QuestionMoves;
     style: OutputStyle;
     timeZone?: string;
   },
 ): string {
   const {style} = options;
-  const partOne = renderPartOne(statusPartOneView(load, options), style);
-  const marks = whatToMark(load.model, load.status, load.created, {
-    ...(load.overarching != null ? {overarching: load.overarching} : {}),
-    pickup: load.pickup,
-    shortLabels: load.shortLabels,
-    titleSummary: load.titleSummary,
-  })
-    .map(markLine)
-    .map((mark) => ({...mark, text: tildeText(mark.text)}));
+  const view = statusPartOneView(load, options);
+  const partOne = renderPartOne(view, style);
+  const marks = [
+    ...whatToMark(load.model, load.status, load.created, {
+      ...(load.overarching != null ? {overarching: load.overarching} : {}),
+      pickup: load.pickup,
+      shortLabels: load.shortLabels,
+      titleSummary: load.titleSummary,
+    }).map(markLine),
+    // home-base-g22jt.7: each confirmed finding with no outcome.
+    ...reviewMarks(view.codeReviews),
+    // home-base-5uu56.2.5 S3: each open question whose named work moved.
+    ...questionMoveMarks(options.questionMoves, options.timeZone),
+  ].map((mark) => ({...mark, text: tildeText(mark.text)}));
   let markBlock: string;
   if (marks.length === 0) {
     markBlock = style.color ? `${pad(2)}Nothing to mark.` : 'Nothing to mark.';
@@ -1533,8 +1623,16 @@ export async function runThreadStatus(
       renderPartOne(fileView, PLAIN_STYLE),
     );
   }
+  // home-base-5uu56.2.5: thread status only (thread show and the inbox never
+  // pay for it), this session's open questions only, one br read per DB (S5).
+  const questionMoves = checkQuestionMoves({
+    ownDirs: [...new Set(load.model.sightings.map((entry) => entry.beadsDir))],
+    questions: openQuestions(load.model),
+    readers: options.questionMoveReaders ?? realQuestionMoveReaders(env),
+    sessionBeadId: load.model.sessionBeadId,
+  });
   await writeStdout(
-    `${renderThreadStatus(load, {changesOnly, delta, message, messageQuestions, now, questionIdProblems, style, timeZone: options.timeZone})}\n`,
+    `${renderThreadStatus(load, {changesOnly, delta, message, messageQuestions, now, questionIdProblems, questionMoves, style, timeZone: options.timeZone})}\n`,
   );
   if (reportPath != null && reportFileError != null) {
     console.error(reportFileFailedLine(reportPath, reportFileError));
@@ -1685,6 +1783,7 @@ export function renderSessionShow(
   const partOne = renderPartOne(
     partOneView({
       action: load.action,
+      codeReviews: load.codeReviews,
       counts: load.counts,
       jobs: load.jobHealth,
       marks: load.marks,

@@ -135,6 +135,15 @@ async function handOffAs(w: World, session: string): Promise<void> {
     env: {...w.env, CLAUDE_CODE_SESSION_ID: session},
     note: null,
     now: NOW,
+    // home-base-1vcgs D2: this fixture links before it hands off, and its
+    // sessions have no transcripts, so the real reader says "unknown" and the
+    // handoff refuses, as designed. The successors here have stopped.
+    readSuccessorActivity: () =>
+      Promise.resolve({
+        activity: {kind: 'stopped'},
+        kind: 'read',
+        sessionId: session,
+      }),
     sessionId: session,
     to: null,
   });

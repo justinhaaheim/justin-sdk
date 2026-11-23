@@ -61,6 +61,36 @@ interface World {
   sandbox: Sandbox;
 }
 
+/** Files `session`'s bead and its first message log line; returns the bead id. */
+function addSession(
+  w: World,
+  session: string,
+  text = 'migrate the db',
+): string {
+  const filed = ensureSessionBead({
+    cwd: w.repo,
+    env: {...w.env, CLAUDE_CODE_SESSION_ID: session},
+    firstPrompt: {at: '2030-01-01T09:00:00.000Z', text},
+    now: new Date('2030-01-01T09:00:00.000Z'),
+    sessionId: session,
+  });
+  if (filed.kind !== 'created') throw new Error(filed.detail);
+  w.beads[session] = filed.beadId;
+  const path = messageLogPath(session, w.env);
+  mkdirSync(dirname(path), {recursive: true});
+  writeFileSync(
+    path,
+    serializeMessageLine({
+      at: '2030-01-01T09:00:00.000Z',
+      cwd: w.repo,
+      event: 'UserPromptSubmit',
+      role: 'user',
+      text,
+    }),
+  );
+  return filed.beadId;
+}
+
 function world(sessions: readonly string[] = [GRAND, OLD, NEW]): World {
   needBr();
   const sb = createSandbox();
@@ -85,31 +115,9 @@ function world(sessions: readonly string[] = [GRAND, OLD, NEW]): World {
   const repo = initRepo(sb, 'pickup-repo', {'README.md': '# p\n'});
   const init = runBr(repo, ['init', '--prefix', 't', '-q']);
   if (!init.ok) throw new Error(`br init failed: ${init.reason ?? '?'}`);
-  const beads: Record<string, string> = {};
-  for (const session of sessions) {
-    const filed = ensureSessionBead({
-      cwd: repo,
-      env: {...env, CLAUDE_CODE_SESSION_ID: session},
-      firstPrompt: {at: '2030-01-01T09:00:00.000Z', text: 'migrate the db'},
-      now: new Date('2030-01-01T09:00:00.000Z'),
-      sessionId: session,
-    });
-    if (filed.kind !== 'created') throw new Error(filed.detail);
-    beads[session] = filed.beadId;
-    const path = messageLogPath(session, env);
-    mkdirSync(dirname(path), {recursive: true});
-    writeFileSync(
-      path,
-      serializeMessageLine({
-        at: '2030-01-01T09:00:00.000Z',
-        cwd: repo,
-        event: 'UserPromptSubmit',
-        role: 'user',
-        text: 'migrate the db',
-      }),
-    );
-  }
-  return {beads, env, repo, sandbox: sb};
+  const w: World = {beads: {}, env, repo, sandbox: sb};
+  for (const session of sessions) addSession(w, session);
+  return w;
 }
 
 function beadOf(w: World, session: string): string {
@@ -1089,5 +1097,261 @@ describe('the pickup when something is off', () => {
     expect(exitCode).toBe(2);
     expect(lines.join('\n')).toContain(`${filed.id} WAS filed`);
     expect(lines.join('\n')).toContain(beadOf(w, NEW));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// home-base-1vcgs: a predecessor resumed after its successor, handed off again
+// ---------------------------------------------------------------------------
+
+/** D2's reader, answering the same for every successor. */
+function activityOf(kind: 'failed' | 'stopped' | 'working') {
+  return () =>
+    Promise.resolve(
+      kind === 'failed'
+        ? {kind: 'failed' as const, reason: 'the test cannot read it'}
+        : {
+            activity:
+              kind === 'working'
+                ? {kind: 'working' as const, lastRecordAt: NOW.toISOString()}
+                : {kind: 'stopped' as const},
+            kind: 'read' as const,
+            sessionId: OTHER,
+          },
+    );
+}
+
+function numberLabel(w: World, id: string): string | undefined {
+  return shown(w, id).labels.find((label) =>
+    label.startsWith('handoff-number:'),
+  );
+}
+
+describe('a session resumed after its successor, then handed off again (home-base-1vcgs)', () => {
+  test('AC1: S1 stopped, P hands off again, S2 is linked, holds P’s work and the next number', async () => {
+    const w = world([GRAND, OLD, NEW, OTHER]);
+    const {own} = await chain(w);
+    const question = await ask(w, OLD, 'Keep the old index?');
+    const oldBead = beadOf(w, OLD);
+    const s1 = beadOf(w, OTHER);
+    const s2 = beadOf(w, NEW);
+    // S1 (the 10/24 session) continues P.
+    expect(await pickUp(w, {session: OTHER})).toMatchObject({
+      pickup: {kind: 'picked-up'},
+    });
+    // P is resumed and hands off again, minutes after S1 was created.
+    const handed = await handOff({
+      cwd: w.repo,
+      env: w.env,
+      note: 'again',
+      now: new Date(Date.now() + 3 * 60_000),
+      readSuccessorActivity: activityOf('stopped'),
+      sessionId: OLD,
+      timeZone: 'UTC',
+      to: null,
+    });
+    expect(handed.kind).toBe('handedOff');
+    expect(describeHandoffOutcome(handed).lines.join('\n')).toContain(
+      `This session was already continued by ${s1}, which has stopped; the new successor becomes the newest.`,
+    );
+
+    const second = await pickUp(w);
+    expect(second).toMatchObject({
+      pickup: {kind: 'picked-up', replaces: [s1]},
+    });
+    expect(describeRequestOutcome(second).lines.join('\n')).toContain(
+      'this session is now its newest successor',
+    );
+    expectLabels(w, s2, [`continues:${oldBead}`, 'picked-up']);
+    expect(shown(w, s2).labels).not.toContain('not-a-successor');
+    expectLabels(w, oldBead, [`continued-by:${s1}`, `continued-by:${s2}`]);
+    expect(shown(w, own).labels).toContain(`sid:${NEW}`);
+    expect(shown(w, question).labels).toContain(`sid:${NEW}`);
+    // D4: S1 is the first handoff, so S2 is the second, never a second #1.
+    expect(numberLabel(w, s1)).toBe('handoff-number:1');
+    expect(numberLabel(w, s2)).toBe('handoff-number:2');
+  });
+
+  test('AC2: the /clear case: S1 linked, P has not handed off since, a second session is refused', async () => {
+    const w = world([GRAND, OLD, NEW, OTHER]);
+    await chain(w);
+    const oldBead = beadOf(w, OLD);
+    const s1 = beadOf(w, OTHER);
+    // P hands off BEFORE S1 exists (S1's bead is created after the kickoff).
+    expect(
+      (
+        await handOff({
+          cwd: w.repo,
+          env: w.env,
+          note: null,
+          now: new Date(Date.now() - 5 * 60_000),
+          sessionId: OLD,
+          timeZone: 'UTC',
+          to: null,
+        })
+      ).kind,
+    ).toBe('handedOff');
+    expect(await pickUp(w, {session: OTHER})).toMatchObject({
+      pickup: {kind: 'picked-up'},
+    });
+    const refused = await pickUp(w);
+    expect(refused).toMatchObject({
+      pickup: {continuedBy: s1, kind: 'not-a-successor', recordedNow: true},
+    });
+    expect(shown(w, oldBead).labels).not.toContain(
+      `continued-by:${beadOf(w, NEW)}`,
+    );
+    expect(
+      shown(w, beadOf(w, NEW)).labels.some((label) =>
+        label.startsWith('continues:'),
+      ),
+    ).toBe(false);
+  });
+
+  test('AC3: thread handoff refuses up front, writing nothing, while S1 works or cannot be read', async () => {
+    const w = world([GRAND, OLD, NEW, OTHER]);
+    await chain(w);
+    expect(await pickUp(w, {session: OTHER})).toMatchObject({
+      pickup: {kind: 'picked-up'},
+    });
+    const s1 = beadOf(w, OTHER);
+    for (const kind of ['working', 'failed'] as const) {
+      const before = writesSnapshot(w);
+      const outcome = await handOff({
+        cwd: w.repo,
+        env: w.env,
+        note: 'again',
+        now: new Date(Date.now() + 3 * 60_000),
+        readSuccessorActivity: activityOf(kind),
+        sessionId: OLD,
+        timeZone: 'UTC',
+        to: null,
+      });
+      expect(outcome.kind).toBe('refused');
+      const {exitCode, lines} = describeHandoffOutcome(outcome);
+      expect(exitCode).toBe(2);
+      expect(lines.join('\n')).toContain(
+        kind === 'working'
+          ? `${s1} continues this session and is working now`
+          : `whether it is working now could not be read`,
+      );
+      expect(writesSnapshot(w)).toEqual(before);
+      expect(shown(w, beadOf(w, OLD)).labels).not.toContain('handed-off');
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// home-base-1vcgs.2: a request the newer of two successors carries
+// ---------------------------------------------------------------------------
+
+/**
+ * Two sessions filed one after the other, the older with the smaller bead id.
+ * br sorts labels, so a predecessor's first `continued-by:` is the smaller id,
+ * and the old rule (follow the first label) is wrong only when that is the
+ * older session. Bead ids are hashes, so sessions are filed until a later one
+ * has a larger id than the smallest filed before it. All twelve failing needs
+ * twelve ids in strictly falling order: odds of 1 in 12 factorial.
+ */
+function olderThenNewer(w: World): {newer: string; older: string} {
+  let smallest: {bead: string; session: string} | null = null;
+  for (let tried = 0; tried < 12; tried += 1) {
+    const session = `5b000000-1111-4222-8333-0000000000${tried.toString(16).padStart(2, '0')}`;
+    const bead = addSession(w, session, `successor number ${tried}`);
+    if (smallest != null && bead > smallest.bead) {
+      return {newer: session, older: smallest.session};
+    }
+    if (smallest == null || bead < smallest.bead) smallest = {bead, session};
+  }
+  throw new Error('no two sessions got bead ids in their creation order');
+}
+
+describe('a request the newer of two successors carries (home-base-1vcgs.2)', () => {
+  test('thread status and the inbox show it carried by the newer one, not dropped by the older one', async () => {
+    const w = world([OLD]);
+    const {newer, older} = olderThenNewer(w);
+    const s1 = beadOf(w, older);
+    const s2 = beadOf(w, newer);
+    await request(w, OLD, 'Filed before the first handoff');
+    expect(await pickUp(w, {session: older})).toMatchObject({
+      pickup: {kind: 'picked-up'},
+    });
+    // P is resumed after S1 stopped, files more work, and hands off again.
+    const late = await request(w, OLD, 'Filed after the first successor');
+    const handed = await handOff({
+      cwd: w.repo,
+      env: w.env,
+      note: 'again',
+      now: new Date(Date.now() + 3 * 60_000),
+      readSuccessorActivity: activityOf('stopped'),
+      sessionId: OLD,
+      timeZone: 'UTC',
+      to: null,
+    });
+    expect(handed.kind).toBe('handedOff');
+    expect(await pickUp(w, {session: newer})).toMatchObject({
+      pickup: {kind: 'picked-up', replaces: [s1]},
+    });
+
+    // Each pickup titles its successor after P's first request, so the two
+    // get titles of their own here, to tell them apart in the lines.
+    const newerTitle = 'The newer successor';
+    for (const [id, title] of [
+      [s1, 'The older successor'],
+      [s2, newerTitle],
+    ] as const) {
+      const retitled = brUpdate({cwd: w.repo}, id, {title});
+      if (retitled.kind === 'failed') throw new Error(`retitle ${id}`);
+    }
+
+    // The fixture: P's first continued-by: names the older S1, S1 does not
+    // hold the late request, and S2 does.
+    const oldBead = beadOf(w, OLD);
+    expect(
+      shown(w, oldBead).labels.filter((label) =>
+        label.startsWith('continued-by:'),
+      ),
+    ).toEqual([`continued-by:${s1}`, `continued-by:${s2}`]);
+    expect(shown(w, late).labels).toContain(`sid:${newer}`);
+    expect(shown(w, late).labels).not.toContain(`sid:${older}`);
+
+    // thread status (Part 1) of P.
+    const load = await loadSessionReport({
+      asIfYielded: true,
+      cwd: w.repo,
+      env: w.env,
+      now: NOW,
+      selector: null,
+      sessionId: OLD,
+    });
+    if (load.kind !== 'loaded') throw new Error(JSON.stringify(load));
+    const line = load.requestStates.get(late);
+    expect(line?.carriedBy ?? '').toEndWith(` ${newerTitle}`);
+    expect(line?.state).not.toContain('does not hold this request');
+    const text = renderThreadStatus(load, {
+      now: NOW,
+      style: {color: false, width: null},
+      timeZone: 'UTC',
+    });
+    expect(text).toContain(`Carried by ${line?.carriedBy ?? '?'}: `);
+    expect(text).not.toContain('which does not hold this request');
+
+    // The inbox (and the dashboard that reads it): P's card says the same.
+    const inbox = await readInbox({
+      cwd: w.repo,
+      days: 30,
+      env: w.env,
+      now: NOW,
+      repo: null,
+    });
+    if (inbox.kind !== 'read') throw new Error(inbox.reason);
+    const card = inbox.read.rows.find((row) => row.sessionId === OLD)?.card;
+    const asked = card?.youAsked;
+    const inboxLine =
+      asked?.kind === 'requests'
+        ? asked.requests.find((entry) => entry.id === late)?.stateLine
+        : null;
+    expect(inboxLine?.carriedBy ?? '').toEndWith(` ${newerTitle}`);
+    expect(inboxLine?.state).not.toContain('does not hold this request');
   });
 });

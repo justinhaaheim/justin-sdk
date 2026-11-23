@@ -1154,8 +1154,11 @@ export function otherTestRuns(
   return {kind: 'checked', runs: runs.map((line) => line.trim())};
 }
 
-/** `ps` of every process, or null when ps itself failed (the sandbox denies it). */
-function readPs(): string | null {
+/**
+ * `ps` of every process, or null when ps itself failed (the sandbox denies
+ * it). scripts/test-parallel.ts runs the same busy check with it.
+ */
+export function readPs(): string | null {
   try {
     const ps = Bun.spawnSync(['ps', '-axo', 'pid=,etime=,args='], {
       stderr: 'pipe',

@@ -6,10 +6,11 @@
  * hooks. I just want to test this out first." So the block tells the successor
  * to run one command; nothing injects the messages.
  *
- * WHEN (D6, D7). Only when componentConfig.thread.handoff.readMessages is true
- * AND the session bead carries `session-role:mayor`, the same label
- * mayorSuccessorSentence reads. Conductor sessions carry no mark yet (D7), so
- * they get nothing. Every other block is byte-for-byte as before.
+ * WHEN (D6, D7; home-base-eq5oy C2). Only when
+ * componentConfig.thread.handoff.readMessages is true AND the session bead
+ * carries `session-role:mayor` (the label mayorSuccessorSentence reads) or
+ * `session-role:conductor` (set by `thread mark --conductor`). Every other
+ * block is byte-for-byte as before.
  *
  * WHICH SESSIONS (D2). The command names the HANDING-OFF session's bead: a
  * successor at pickup holds no message of his yet (its first line is a
@@ -25,7 +26,7 @@
  */
 
 import {sdkRun} from '../sdk-invocation';
-import {MAYOR_ROLE_LABEL} from './session-bead';
+import {CONDUCTOR_ROLE_LABEL, MAYOR_ROLE_LABEL} from './session-bead';
 
 /** His last this-many sessions (Option A of Q172). */
 export const READ_MESSAGES_SESSIONS = 3;
@@ -42,10 +43,16 @@ export function readMessagesLine(sessionBeadId: string): string {
   return `Before anything else, run \`${readMessagesCommand(sessionBeadId)}\` and read all of its output: it is Justin's own words from his last ${READ_MESSAGES_SESSIONS} sessions, each followed by what Claude did after it. Treat them as high-signal guidance. If Claude Code saves the output to a file, read the whole file with the Read tool, in parts.`;
 }
 
-/** Whether a block gets the line (D6, D7): the knob on, and a mayor session. */
+/**
+ * Whether a block gets the line (D6, D7, home-base-eq5oy C2): the knob on, and
+ * a mayor or a conductor session.
+ */
 export function blockGetsReadMessagesLine(
   knob: boolean,
   labels: readonly string[],
 ): boolean {
-  return knob && labels.includes(MAYOR_ROLE_LABEL);
+  return (
+    knob &&
+    (labels.includes(MAYOR_ROLE_LABEL) || labels.includes(CONDUCTOR_ROLE_LABEL))
+  );
 }

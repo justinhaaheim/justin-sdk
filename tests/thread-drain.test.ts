@@ -42,7 +42,7 @@ import {join} from 'path';
 import {spoolDir} from '../src/thread/archive';
 import {drainSpool, renderDrain, type SpoolApplier} from '../src/thread/drain';
 import {validateThreadReport} from '../src/thread/schema';
-import {examplePayload} from './thread-schema.test';
+import {examplePayload} from './thread-schema-example';
 
 let stateDir: string;
 let env: Record<string, string | undefined>;

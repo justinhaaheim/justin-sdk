@@ -58,7 +58,7 @@ import {
   type ThreadStartOutcome,
 } from '../src/thread/start';
 import {createFakeBd} from './fake-bd';
-import {examplePayload} from './thread-schema.test';
+import {examplePayload} from './thread-schema-example';
 
 const SESSION = '7f3c1e20-aaaa-4bbb-8ccc-0123456789ab';
 

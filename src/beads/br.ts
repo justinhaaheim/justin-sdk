@@ -1450,6 +1450,87 @@ export function brShow(target: BrTarget, id: string): BrShowOutcome {
   return {issue, kind: 'ok'};
 }
 
+/**
+ * `br show <id>… --json` for several ids in ONE br call (home-base-5uu56.2.5
+ * S5), parsed. `calls` is how many br processes it took.
+ *
+ * br answers a call that names a missing id with ISSUE_NOT_FOUND for the
+ * FIRST missing id and nothing for the rest (measured 2026-11-21 on br 0.1.37
+ * and 0.7.6: exit 3, "Issue not found: <id>"). So a missing id is dropped and
+ * the call is made again without it: one call when every id is there, one more
+ * per missing id. A failure that names no id of the call is a failure for all
+ * of them, never "not found" (rule 7).
+ */
+export type BrShowManyOutcome =
+  | (BrFailed & {calls: number})
+  | {calls: number; issues: BrIssue[]; kind: 'ok'; notFound: string[]};
+
+/** The id br's not-found answer names, or null. */
+function notFoundId(failed: BrFailed): string | null {
+  const text = [failed.reason, ...failed.detail].join('\n');
+  const match = /Issue not found: (\S+)/.exec(text);
+  return match?.[1] ?? null;
+}
+
+export function brShowMany(
+  target: BrTarget,
+  ids: readonly string[],
+): BrShowManyOutcome {
+  let remaining = [...new Set(ids)];
+  const notFound: string[] = [];
+  let calls = 0;
+  while (remaining.length > 0) {
+    const args = ['show', ...remaining, '--json'];
+    calls += 1;
+    const call = callBr(target, args);
+    if (!call.ok) {
+      const missing = isNotFound(call.failed) ? notFoundId(call.failed) : null;
+      if (missing == null || !remaining.includes(missing)) {
+        return {...call.failed, calls};
+      }
+      notFound.push(missing);
+      remaining = remaining.filter((id) => id !== missing);
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(call.out.stdout);
+    } catch (error) {
+      return {
+        calls,
+        command: `br ${args.join(' ')} ${describeTarget(target)}`,
+        detail: [],
+        kind: 'failed',
+        reason: `br show printed something that is not JSON: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+    const issues = parseBrIssues(Array.isArray(parsed) ? parsed : [parsed]);
+    if (!issues.ok) {
+      return {
+        calls,
+        command: `br ${args.join(' ')} ${describeTarget(target)}`,
+        detail: [],
+        kind: 'failed',
+        reason: `br show --json: ${issues.reason}`,
+      };
+    }
+    const shown = new Set(issues.issues.map((issue) => issue.id));
+    const absent = remaining.filter((id) => !shown.has(id));
+    if (absent.length > 0) {
+      // Asked for and not answered, with no not-found error: br changed shape.
+      return {
+        calls,
+        command: `br ${args.join(' ')} ${describeTarget(target)}`,
+        detail: [],
+        kind: 'failed',
+        reason: `br show --json returned no record for ${absent.join(', ')}`,
+      };
+    }
+    return {calls, issues: issues.issues, kind: 'ok', notFound};
+  }
+  return {calls, issues: [], kind: 'ok', notFound};
+}
+
 /** A child of a bead, as `br show --json` lists it under `dependents`. */
 export interface BrChild {
   id: string;

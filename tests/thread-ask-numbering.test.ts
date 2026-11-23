@@ -26,7 +26,7 @@ import {askViewOf, orderAsks} from '../src/thread/answer';
 import {ASKS_HEADING, renderMarkdown} from '../src/thread/render-markdown';
 import {buildReportModel} from '../src/thread/report-model';
 import {validateThreadReport} from '../src/thread/schema';
-import {examplePayload} from './thread-schema.test';
+import {examplePayload} from './thread-schema-example';
 
 const THIS_REPORT = 3;
 

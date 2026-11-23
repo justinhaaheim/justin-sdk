@@ -46,7 +46,7 @@ import {validateThreadReport} from '../src/thread/schema';
 import {startThread} from '../src/thread/start';
 import {projectDirSlug} from '../src/thread/transcript-messages';
 import {createFakeBd, type FakeBd, type FakeIssue} from './fake-bd';
-import {examplePayload} from './thread-schema.test';
+import {examplePayload} from './thread-schema-example';
 
 const DAY = 86_400_000;
 const SESSION = '7f3c1e20-aaaa-4bbb-8ccc-0123456789ab';

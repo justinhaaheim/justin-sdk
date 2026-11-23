@@ -24,6 +24,7 @@
  */
 
 import type {ChainNamer} from './chain-names';
+import type {StepBead, StepRead} from './chain-step';
 import type {ChainReaders} from './handoff-chain';
 import type {EnvLike} from './paths';
 import type {FoundSession} from './session-select';
@@ -54,11 +55,14 @@ import {
   readChainNames,
   registryChainNamer,
 } from './chain-names';
+import {backLinkOf, successorsOf} from './chain-step';
 import {handoffDeferralMessage} from './handoff-gate';
 import {walkedSessionMarks} from './handoff-marks';
 import {
   chainRootOf,
   continuationLabels,
+  continuationRoleLabels,
+  type HandoffNumber,
   handoffNumberOf,
   mayorSuccessorSentence,
 } from './handoff-number';
@@ -72,10 +76,12 @@ import {notFoundButUnresolved} from './session-answer';
 import {
   AUTO_TITLE_LABEL,
   CHAIN_NAME_LABEL_PREFIX,
+  CONDUCTOR_ROLE_LABEL,
   CONTINUED_BY_LABEL_PREFIX,
   CONTINUES_LABEL_PREFIX,
   HANDED_OFF_LABEL,
   HANDOFF_NUMBER_LABEL_PREFIX,
+  MAYOR_ROLE_LABEL,
   PICKUP_EXPECTED_LABEL,
 } from './session-bead';
 import {readSessionIndex, readSessionSightings} from './session-index';
@@ -90,6 +96,8 @@ import {selectSession, sessionBeadsKnob} from './session-select';
 import {
   deriveStatus,
   isOpen,
+  type LiveActivity,
+  liveActivityOf,
   openQuestions,
   stageReached,
   statusFactsOf,
@@ -101,6 +109,8 @@ import {
 
 export type BeadLocation =
   | {
+      /** br's created_at (home-base-1vcgs D1, D3); null when br gave none. */
+      createdAt?: null | string;
       db: string;
       /** The id br show printed (home-base-9ihcl.4: focus reads it from here). */
       id: string;
@@ -156,6 +166,7 @@ export function locateSessionBead(
     }
     if (shown.kind === 'ok') {
       return {
+        createdAt: shown.issue.createdAt,
         db,
         id: shown.issue.id,
         kind: 'found',
@@ -169,6 +180,37 @@ export function locateSessionBead(
     return notFoundButUnresolved(beadId, dbs, unresolved);
   }
   return {kind: 'notFound', searched: dbs};
+}
+
+/**
+ * home-base-1vcgs.1 F2: a session bead with its creation time, for
+ * withNewestSuccessor (session-status.ts). Called only for a bead that names
+ * two or more successors.
+ */
+export function realSuccessorBeadReader(input: {
+  env: EnvLike;
+  fallbackDbs: readonly string[];
+}): (beadId: string) => StepRead<StepBead> {
+  return (beadId) => {
+    const located = locateSessionBead(beadId, input.env, input.fallbackDbs);
+    if (located.kind === 'failed') {
+      return {kind: 'failed', reason: located.reason};
+    }
+    if (located.kind === 'notFound') {
+      return {
+        kind: 'notFound',
+        reason: `not found in ${located.searched.length > 0 ? located.searched.join(' or ') : 'any beads DB'}`,
+      };
+    }
+    return {
+      bead: {
+        createdAt: located.createdAt ?? null,
+        id: beadId,
+        labels: located.labels,
+      },
+      kind: 'found',
+    };
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -209,6 +251,78 @@ export type HandoffNumberHeal =
   | {detail: string; kind: 'stamped'; labels: string[]; number: number};
 
 /**
+ * home-base-1vcgs D4: the number the new successor counts on from, the highest
+ * of the predecessor's and of every successor the predecessor already names
+ * (other than the new one), so a replacement successor never shows the same
+ * [Name-N] as the one before it. Any number that cannot be read is unknown, so
+ * the new bead gets no number label and shows [#?] (rule 7). The link
+ * (linkContinuation) and the heal (F3, below) both count from it.
+ */
+export function highestNumberBefore(input: {
+  newBeadId: string;
+  old: {id: string; labels: readonly string[]};
+  readers: ChainReaders;
+}): HandoffNumber {
+  const {old, readers} = input;
+  let highest = handoffNumberOf(old, readers);
+  for (const other of successorsOf(old.labels)) {
+    if (highest.kind === 'unknown') return highest;
+    if (other === input.newBeadId) continue;
+    const read = readers.showBead(other);
+    if (read.kind !== 'found') {
+      return {
+        kind: 'unknown',
+        reason: `${old.id} is already continued by ${other}, which could not be read: ${read.reason}`,
+      };
+    }
+    const theirs = handoffNumberOf({id: other, labels: read.labels}, readers);
+    if (theirs.kind === 'unknown') return theirs;
+    if (theirs.number > highest.number) {
+      highest = {kind: 'known', number: theirs.number};
+    }
+  }
+  return highest;
+}
+
+/**
+ * home-base-1vcgs.1 F3: the number the heal stamps, by the link's own rule
+ * (highestNumberBefore, home-base-1vcgs D4): 1 + the highest number among the
+ * predecessor and every other successor it names. A replacement successor
+ * healed later so never takes its predecessor's first successor's number. A
+ * bead with no `continues:`, or two, keeps D3's walk, which says so. Never
+ * throws, as handoffNumberOf does not: a reader that throws is unknown.
+ */
+function healedNumberOf(
+  bead: {id: string; labels: readonly string[]},
+  readers: ChainReaders,
+): HandoffNumber {
+  const back = backLinkOf(bead.labels);
+  if (back.kind !== 'one') return handoffNumberOf(bead, readers);
+  try {
+    const predecessor = readers.showBead(back.id);
+    if (predecessor.kind !== 'found') {
+      return {
+        kind: 'unknown',
+        reason: `${bead.id} continues ${back.id}, which could not be read: ${predecessor.reason}`,
+      };
+    }
+    const before = highestNumberBefore({
+      newBeadId: bead.id,
+      old: {id: back.id, labels: predecessor.labels},
+      readers,
+    });
+    return before.kind === 'known'
+      ? {kind: 'known', number: before.number + 1}
+      : before;
+  } catch (error) {
+    return {
+      kind: 'unknown',
+      reason: `reading the chain threw: ${String(error)}`,
+    };
+  }
+}
+
+/**
  * D5, the self-heal: a session bead that continues another and has no number
  * label gets one when D3 can establish it. It reaches a session linked before
  * the label existed, on its next prompt. Never throws: the capture child calls
@@ -236,7 +350,7 @@ export function healHandoffNumber(input: {
         kind: 'failed',
       };
     }
-    const number = handoffNumberOf(
+    const number = healedNumberOf(
       {id: beadId, labels},
       input.readers ?? realHandoffNumberReaders({env, fallbackDbs: [db]}),
     );
@@ -400,12 +514,23 @@ export type LinkOutcome =
  * This is the one place that writes `continues:` (home-base-6n7my.2 D4): the
  * pickup, so auto pickup and `thread request --continues`, and `thread handoff
  * --to` all reach it. The handoff number and the mayor label go in that same
- * write, through continuationLabels.
+ * write, through continuationLabels, and so does the conductor label
+ * (home-base-eq5oy C3).
+ *
+ * C4: a conductor link must know whether the successor is already a mayor.
+ * The pickup passes the labels it just read; any other caller has them read
+ * here, and only for a conductor link. A read that fails leaves them unknown
+ * (continuationRoleLabels says what that does).
  */
 export function linkContinuation(input: {
   cwd: string;
   env: EnvLike;
-  newSession: {beadId: string; db: string};
+  newSession: {
+    beadId: string;
+    db: string;
+    /** The successor's labels, when the caller has just read them. */
+    labels?: readonly string[];
+  };
   /** Tests inject these; the real ones read through locateSessionBead. */
   numberReaders?: ChainReaders;
   oldBeadId: string;
@@ -431,17 +556,31 @@ export function linkContinuation(input: {
     };
   }
   const failures: string[] = [];
-  const oldNumber = handoffNumberOf(
-    {id: oldBeadId, labels: old.labels},
+  const numberReaders =
     input.numberReaders ??
-      realHandoffNumberReaders({env, fallbackDbs: fallbacks}),
-  );
+    realHandoffNumberReaders({env, fallbackDbs: fallbacks});
+  const oldNumber = highestNumberBefore({
+    newBeadId: newSession.beadId,
+    old: {id: oldBeadId, labels: old.labels},
+    readers: numberReaders,
+  });
+  const conductorLink =
+    old.labels.includes(CONDUCTOR_ROLE_LABEL) &&
+    !old.labels.includes(MAYOR_ROLE_LABEL);
+  let newLabels: null | readonly string[] = newSession.labels ?? null;
+  if (newLabels == null && conductorLink) {
+    const shown = brShow({db: newSession.db, env}, newSession.beadId);
+    if (shown.kind === 'ok') newLabels = shown.issue.labels;
+  }
+  const roleRemovals = continuationRoleLabels(old.labels, newLabels).remove;
   const mine = brUpdate({db: newSession.db, env}, newSession.beadId, {
     addLabels: continuationLabels({
+      newLabels,
       oldBeadId,
       oldLabels: old.labels,
       oldNumber,
     }),
+    ...(roleRemovals.length > 0 ? {removeLabels: roleRemovals} : {}),
   });
   if (mine.kind === 'failed') {
     failures.push(
@@ -467,14 +606,112 @@ export function linkContinuation(input: {
 }
 
 // ---------------------------------------------------------------------------
+// home-base-1vcgs D2: a successor this session already names
+// ---------------------------------------------------------------------------
+
+/** One successor's activity as D2 reads it; tests inject this. */
+export type SuccessorActivityReader = (
+  successorBeadId: string,
+) => Promise<
+  | {activity: LiveActivity; kind: 'read'; sessionId: string}
+  | {kind: 'failed'; reason: string}
+>;
+
+/** The real reader: the successor's session model, through the inbox's facts. */
+export function realSuccessorActivity(input: {
+  cwd: string;
+  env: EnvLike;
+  now: Date;
+}): SuccessorActivityReader {
+  return async (successorBeadId) => {
+    const loaded = await loadSession({
+      cwd: input.cwd,
+      env: input.env,
+      selector: successorBeadId,
+      sessionIdOption: null,
+    });
+    if (loaded.kind !== 'loaded') {
+      return {
+        kind: 'failed',
+        reason: loaded.kind === 'unreadable' ? loaded.detail : loaded.reason,
+      };
+    }
+    return {
+      activity: liveActivityOf(statusFactsOf(loaded.model), input.now),
+      kind: 'read',
+      sessionId: loaded.model.sessionId,
+    };
+  };
+}
+
+export type NamedSuccessorsCheck =
+  /** Every successor named is stopped; `earlier` lists them, oldest label first. */
+  | {earlier: string[]; kind: 'clear'}
+  /** One is working now, or its state could not be read: refuse, write nothing. */
+  | {kind: 'refuse'; reason: string};
+
+/**
+ * D2: before `thread handoff` writes anything, read every successor this
+ * session already names (`continued-by:`). One that is working now, or whose
+ * state cannot be read, refuses the handoff: opening another successor then
+ * makes two sessions work on one chain. Stopped, done, handed off and out of
+ * context all pass, and the caller says the new successor becomes the newest.
+ */
+export async function checkNamedSuccessors(input: {
+  beadId: string;
+  labels: readonly string[];
+  read: SuccessorActivityReader;
+}): Promise<NamedSuccessorsCheck> {
+  const named = successorsOf(input.labels);
+  for (const successor of named) {
+    const read = await input.read(successor);
+    if (read.kind === 'failed') {
+      return {
+        kind: 'refuse',
+        reason: `${successor} continues this session, and whether it is working now could not be read (${read.reason}). Nothing was written and no tab was opened. Look at it first: ${sdkRun(`thread show ${successor}`)}`,
+      };
+    }
+    if (read.activity.kind === 'working') {
+      return {
+        kind: 'refuse',
+        reason: `${successor} continues this session and is working now; continue there (claude --resume ${read.sessionId}), or wait until it stops. Nothing was written and no tab was opened.`,
+      };
+    }
+    if (read.activity.kind === 'unknown') {
+      return {
+        kind: 'refuse',
+        reason: `${successor} continues this session, and whether it is working now could not be read: ${read.activity.reasons.join('; ')}. Nothing was written and no tab was opened. Continue there (claude --resume ${read.sessionId}), or run this again once it has stopped.`,
+      };
+    }
+  }
+  return {earlier: named, kind: 'clear'};
+}
+
+/** D2's one line when the session was already continued; null when it was not. */
+export function earlierSuccessorsLine(
+  beadId: string,
+  earlier: readonly string[],
+): null | string {
+  if (earlier.length === 0) return null;
+  return `${beadId} was already continued by ${earlier.join(' and ')}, which ${earlier.length === 1 ? 'has' : 'have'} stopped; the new successor becomes the newest.`;
+}
+
+// ---------------------------------------------------------------------------
 // thread handoff
 // ---------------------------------------------------------------------------
 
 export interface ThreadHandoffOptions {
+  /**
+   * home-base-1vcgs D2: false when the caller already ran checkNamedSuccessors
+   * (handoffWithSuccessor runs it before the gate). Absent: checked here.
+   */
+  checkSuccessors?: boolean;
   cwd?: string;
   env?: EnvLike;
   note: string | null;
   now?: Date;
+  /** D2's reader; tests inject it. Absent: realSuccessorActivity. */
+  readSuccessorActivity?: SuccessorActivityReader;
   /** `--session`, else CLAUDE_CODE_SESSION_ID. */
   sessionId: string | null;
   timeZone?: string;
@@ -495,6 +732,8 @@ export type HandoffRequestCount =
 export type HandoffOutcome =
   | {
       block: string;
+      /** D2: the stopped successors this session already named; [] when none. */
+      earlierSuccessors?: string[];
       /** Problems after the label was set; non-empty means exit 1. */
       followUpFailures: string[];
       kind: 'handedOff';
@@ -506,7 +745,9 @@ export type HandoffOutcome =
         | {kind: 'none'}
         | {kind: 'noBeadYet'; sessionId: string};
     }
-  | {kind: 'failed'; reason: string};
+  | {kind: 'failed'; reason: string}
+  /** D2: refused before anything was written (exit 2). */
+  | {kind: 'refused'; reason: string};
 
 /** The successor's session bead id from the index, or null when it has none yet. */
 function successorBead(
@@ -697,7 +938,8 @@ export async function handoffBlock(input: {
   const questions = openQuestions(model);
   // home-base-6n7my.2 D8: for a session started by hand from this block.
   const mayorLine = mayorSuccessorSentence(model.beads.session?.labels ?? []);
-  // home-base-6ujwi D6: off, or not a mayor, nothing is added.
+  // home-base-6ujwi D6, home-base-eq5oy C2: off, or neither a mayor nor a
+  // conductor, nothing is added.
   const readLine = blockGetsReadMessagesLine(
     readMessages,
     model.beads.session?.labels ?? [],
@@ -780,6 +1022,21 @@ export async function handOff(
       ? null
       : oneLine(options.note);
 
+  // ---- home-base-1vcgs D2: a successor already named, read first ----
+  let earlierSuccessors: string[] = [];
+  if (options.checkSuccessors !== false) {
+    const checked = await checkNamedSuccessors({
+      beadId: session.bead.id,
+      labels: session.bead.labels,
+      read:
+        options.readSuccessorActivity ?? realSuccessorActivity({cwd, env, now}),
+    });
+    if (checked.kind === 'refuse') {
+      return {kind: 'refused', reason: checked.reason};
+    }
+    earlierSuccessors = checked.earlier;
+  }
+
   // ---- the label and the note: one write ----
   // home-base-npbse.1.2 item 5: what the inbox's "not picked up" waits on.
   const {resolveThreadConfig} = await import('./config');
@@ -841,6 +1098,7 @@ export async function handOff(
   if (!block.ok) followUpFailures.push(block.reason);
   return {
     block: block.ok ? block.text : '',
+    earlierSuccessors,
     followUpFailures,
     kind: 'handedOff',
     requests: block.ok
@@ -851,9 +1109,12 @@ export async function handOff(
 }
 
 export function describeHandoffOutcome(outcome: HandoffOutcome): {
-  exitCode: 0 | 1 | 4;
+  exitCode: 0 | 1 | 2 | 4;
   lines: string[];
 } {
+  if (outcome.kind === 'refused') {
+    return {exitCode: 2, lines: [`thread handoff: refused: ${outcome.reason}`]};
+  }
   if (outcome.kind === 'failed') {
     return saysBeadsLocked(outcome.reason)
       ? {
@@ -864,6 +1125,11 @@ export function describeHandoffOutcome(outcome: HandoffOutcome): {
   }
   const lines: string[] = [];
   if (outcome.block !== '') lines.push(outcome.block, '');
+  const earlier = earlierSuccessorsLine(
+    'This session',
+    outcome.earlierSuccessors ?? [],
+  );
+  if (earlier != null) lines.push(earlier);
   switch (outcome.successor.kind) {
     case 'linked':
       lines.push(

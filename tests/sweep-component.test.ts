@@ -34,7 +34,7 @@ import {runComponentByName} from '../src/components';
 import {readDeployedStamp} from '../src/rules/rules-file';
 import {readJson, writeJson} from '../src/setup-helpers';
 import {
-  applySweepPayload,
+  applySweepPayload as applySweepPayloadReal,
   committedConfigComponents,
   componentContractPaths,
   holdPinAfterGates,
@@ -74,6 +74,22 @@ let cachedRemote: string | null = null;
 function sdkRemote(): string {
   cachedRemote ??= sdkRemoteWithOwnTag(track);
   return cachedRemote;
+}
+
+/**
+ * applySweepPayload with `sdkRepoUrl` set to this test's local remote. In
+ * component mode, base-setup's pin check runs a real `git ls-remote` whenever
+ * the fixture declares no pin: 3 calls a run, which asked github until the
+ * payload forwarded `sdkRepoUrl` (home-base-ejsq2.5, home-base-ejsq2.9). They
+ * now ask the local remote.
+ */
+function applySweepPayload(
+  ...[worktree, payload, options]: Parameters<typeof applySweepPayloadReal>
+): ReturnType<typeof applySweepPayloadReal> {
+  return applySweepPayloadReal(worktree, payload, {
+    sdkRepoUrl: sdkRemote(),
+    ...options,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -649,6 +665,7 @@ async function driftLikeTheDoctorGate(root: string): Promise<void> {
     noCommit: true,
     projectRoot: root,
     quiet: true,
+    sdkRepoUrl: sdkRemote(),
   });
   expect(exitCode).toBe(0);
 }

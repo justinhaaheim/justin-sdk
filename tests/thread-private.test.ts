@@ -66,7 +66,7 @@ import {
 } from '../src/thread/schema';
 import {projectDirSlug} from '../src/thread/transcript-messages';
 import {createFakeBd} from './fake-bd';
-import {examplePayload} from './thread-schema.test';
+import {examplePayload} from './thread-schema-example';
 
 const PRIVATE_SESSION = 'aaaaaaaa-1111-4111-8111-000000000001';
 const PUBLIC_SESSION = 'bbbbbbbb-2222-4222-8222-000000000002';

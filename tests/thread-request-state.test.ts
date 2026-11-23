@@ -441,6 +441,100 @@ describe('a request carried down a handoff chain', () => {
   });
 });
 
+// home-base-1vcgs.2: a session resumed after its successor stopped, then
+// handed off again, names two successors. br sorts labels, so the first label
+// is the smaller bead id: here the older session, which does not hold the
+// request. The newer one does.
+describe('a predecessor that names two successors (home-base-1vcgs.2)', () => {
+  const request = issue('r-2', {labels: ['request', 'sid:aaa', 'sid:ccc']});
+  const OLDER_AT = '2030-01-01T10:00:00.000Z';
+  const NEWER_AT = '2030-01-02T10:00:00.000Z';
+  const predecessor = (labels: string[]): ChainSession =>
+    chainSession(
+      '[HOME][Moe-1] Threads hub',
+      {kind: 'handedOff', successor: 's-b'},
+      [node(request)],
+      labels,
+    );
+  const session = (
+    name: string,
+    createdAt: null | string,
+    holds: boolean,
+  ): ChainSession => ({
+    ...chainSession(
+      name,
+      holds ? WORKING : OPEN_WORK,
+      holds ? [node(request)] : [],
+    ),
+    createdAt,
+  });
+  const stateOf = (
+    labels: string[],
+    sessions: Record<string, ChainSession>,
+  ): RequestStateLine =>
+    chainRequestState({
+      lookup: lookupOf(sessions),
+      node: node(request),
+      session: predecessor(labels),
+    });
+  const BOTH = ['continued-by:s-b', 'continued-by:s-c'];
+
+  test('carried by the newer successor, though the first label names the older one', () => {
+    const state = stateOf(BOTH, {
+      's-b': session('[HOME][Moe-2] Threads hub', OLDER_AT, false),
+      's-c': session('[HOME][Moe-3] Threads hub', NEWER_AT, true),
+    });
+    expect(state.carriedBy).toBe('[HOME][Moe-3] Threads hub');
+    expect(text(state)).toBe(
+      'Carried by [HOME][Moe-3] Threads hub: Working — next: code-done — since 2 days ago',
+    );
+  });
+
+  test('the creation time decides, not the label order: a newer first label is followed', () => {
+    const state = stateOf(BOTH, {
+      's-b': session('[HOME][Moe-3] Threads hub', NEWER_AT, true),
+      's-c': session('[HOME][Moe-2] Threads hub', OLDER_AT, false),
+    });
+    expect(state.carriedBy).toBe('[HOME][Moe-3] Threads hub');
+  });
+
+  test('an unknown newest keeps today’s words: the first label is followed', () => {
+    const older = session('[HOME][Moe-2] Threads hub', OLDER_AT, false);
+    const cases: Record<string, ChainSession>[] = [
+      // A creation time that is missing.
+      {'s-b': {...older, createdAt: null}, 's-c': session('n', NEWER_AT, true)},
+      // Two equal times.
+      {'s-b': older, 's-c': session('n', OLDER_AT, true)},
+      // The newer one was not looked up.
+      {'s-b': older},
+    ];
+    for (const sessions of cases) {
+      const state = stateOf(BOTH, sessions);
+      expect(state.carriedBy).toBeNull();
+      expect(state.state).toBe(
+        'Stopped: handed off to [HOME][Moe-2] Threads hub, which does not hold this request',
+      );
+    }
+  });
+
+  test('one successor: only that one is looked up', () => {
+    const looked: string[] = [];
+    const state = chainRequestState({
+      lookup: (beadId) => {
+        looked.push(beadId);
+        return {
+          kind: 'found',
+          session: session('[HOME][Moe-2] Threads hub', null, true),
+        };
+      },
+      node: node(request),
+      session: predecessor(['continued-by:s-b']),
+    });
+    expect(state.carriedBy).toBe('[HOME][Moe-2] Threads hub');
+    expect(looked).toEqual(['s-b']);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // What to mark: open requests with no stage, in a session with commits
 // ---------------------------------------------------------------------------

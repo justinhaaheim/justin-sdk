@@ -11,16 +11,21 @@ import type {Sandbox} from './sandbox';
 
 import {afterEach, describe, expect, setDefaultTimeout, test} from 'bun:test';
 import {spawnSync} from 'node:child_process';
-import {mkdirSync, writeFileSync} from 'node:fs';
+import {chmodSync, mkdirSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 
 import {brShow, brUpdate, findBeadsWorkspace, runBr} from '../src/beads/br';
 import {
   describeMarkMayor,
+  markConductor,
   markMayor,
   type MarkMayorOutcome,
 } from '../src/thread/mark-mayor';
-import {ensureSessionBead, MAYOR_ROLE_LABEL} from '../src/thread/session-bead';
+import {
+  CONDUCTOR_ROLE_LABEL,
+  ensureSessionBead,
+  MAYOR_ROLE_LABEL,
+} from '../src/thread/session-bead';
 import {initRepo} from './git-fixtures';
 import {needBr} from './pinned-br';
 import {createSandbox} from './sandbox';
@@ -109,8 +114,11 @@ describe('thread mark --mayor', () => {
     expect(mayorLabels(w)).toEqual([]);
     const outcome = await run(w);
     expect(outcome).toEqual({
+      added: [MAYOR_ROLE_LABEL],
       beadId: w.beadId,
       kind: 'marked',
+      removed: [],
+      role: 'mayor',
       workspaceNote: null,
     });
     expect(mayorLabels(w)).toEqual([MAYOR_ROLE_LABEL]);
@@ -295,7 +303,7 @@ describe('thread mark on the command line', () => {
     const w = world();
     const bare = cli(w, []);
     expect(bare.status).toBe(2);
-    expect(bare.stderr).toContain('--mayor is the only one');
+    expect(bare.stderr).toContain('--mayor or --conductor');
     expect(mayorLabels(w)).toEqual([]);
   });
 
@@ -330,5 +338,214 @@ describe('thread mark on the command line', () => {
     );
     expect(hooked.status).toBe(1);
     expect(hooked.stderr).toContain('no session bead yet');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// home-base-eq5oy: `thread mark --conductor` (C1) and one role per session (C4)
+// ---------------------------------------------------------------------------
+
+function roleLabels(w: World): string[] {
+  return bead(w).labels.filter(
+    (label) => label === MAYOR_ROLE_LABEL || label === CONDUCTOR_ROLE_LABEL,
+  );
+}
+
+function addLabel(w: World, label: string): void {
+  const written = brUpdate({db: w.db, env: w.env}, w.beadId, {
+    addLabels: [label],
+  });
+  if (written.kind === 'failed') throw new Error('br update failed');
+}
+
+describe('thread mark --conductor (C1)', () => {
+  test('adds session-role:conductor once, runs no name follow-up, and a second run writes nothing', async () => {
+    const w = world();
+    let writes = 0;
+    let followUps = 0;
+    const options = {
+      cwd: w.repo,
+      env: w.env,
+      followUp: () => {
+        followUps += 1;
+        return Promise.resolve('renamed workspace');
+      },
+      update: ((...args) => {
+        writes += 1;
+        return brUpdate(...args);
+      }) as typeof brUpdate,
+    };
+    const first = await markConductor(options);
+    expect(first).toEqual({
+      added: [CONDUCTOR_ROLE_LABEL],
+      beadId: w.beadId,
+      kind: 'marked',
+      removed: [],
+      role: 'conductor',
+      workspaceNote: null,
+    });
+    expect(roleLabels(w)).toEqual([CONDUCTOR_ROLE_LABEL]);
+    expect(describeMarkMayor(first)).toEqual({
+      exitCode: 0,
+      lines: [
+        `session ${w.beadId} is now a conductor session: labelled ${CONDUCTOR_ROLE_LABEL}`,
+      ],
+    });
+    const second = await markConductor(options);
+    expect(second.kind).toBe('already');
+    expect(writes).toBe(1);
+    expect(followUps).toBe(0);
+  });
+});
+
+describe('one role per session, and the mayor wins (C4)', () => {
+  test('--conductor on a mayor session writes nothing, and says so', async () => {
+    const w = world();
+    addLabel(w, MAYOR_ROLE_LABEL);
+    const before = bead(w);
+    const outcome = await markConductor({
+      cwd: w.repo,
+      env: w.env,
+      followUp: () => Promise.resolve(null),
+    });
+    expect(outcome).toEqual({beadId: w.beadId, kind: 'mayorWins'});
+    expect(bead(w)).toEqual(before);
+    const {exitCode, lines} = describeMarkMayor(outcome);
+    expect(exitCode).toBe(0);
+    expect(lines.join('\n')).toContain(
+      `${CONDUCTOR_ROLE_LABEL} was NOT written: a session never carries both roles, and the mayor wins`,
+    );
+  });
+
+  test('--mayor on a conductor session takes the conductor label off, in its one write', async () => {
+    const w = world();
+    addLabel(w, CONDUCTOR_ROLE_LABEL);
+    let writes = 0;
+    const outcome = await markMayor({
+      cwd: w.repo,
+      env: w.env,
+      followUp: () => Promise.resolve(null),
+      update: (...args) => {
+        writes += 1;
+        return brUpdate(...args);
+      },
+    });
+    expect(writes).toBe(1);
+    expect(roleLabels(w)).toEqual([MAYOR_ROLE_LABEL]);
+    expect(describeMarkMayor(outcome).lines).toEqual([
+      `session ${w.beadId} is now a mayor session: labelled ${MAYOR_ROLE_LABEL}`,
+      `  removed ${CONDUCTOR_ROLE_LABEL}: a session never carries both roles, and the mayor wins`,
+    ]);
+  });
+
+  test('--mayor on a bead holding both roles removes the conductor label', async () => {
+    const w = world();
+    addLabel(w, MAYOR_ROLE_LABEL);
+    addLabel(w, CONDUCTOR_ROLE_LABEL);
+    const outcome = await run(w);
+    expect(outcome).toMatchObject({added: [], kind: 'marked'});
+    expect(roleLabels(w)).toEqual([MAYOR_ROLE_LABEL]);
+  });
+});
+
+describe('thread mark --conductor on the command line', () => {
+  function cli(w: World, args: string[], input = '') {
+    return spawnSync('bun', [CLI, 'thread', 'mark', ...args], {
+      cwd: w.repo,
+      encoding: 'utf8',
+      env: w.env as NodeJS.ProcessEnv,
+      input,
+    });
+  }
+
+  function expectSilentZero(result: ReturnType<typeof cli>): void {
+    expect({
+      status: result.status,
+      stderr: result.stderr,
+      stdout: result.stdout,
+    }).toEqual({status: 0, stderr: '', stdout: ''});
+  }
+
+  test('--help names --conductor, and does nothing else', () => {
+    const w = world();
+    const help = cli(w, ['--help']);
+    expect(help.status).toBe(0);
+    expect(help.stdout).toContain('--conductor');
+    expect(roleLabels(w)).toEqual([]);
+  });
+
+  test('--conductor marks and says so; a second run exits 0', () => {
+    const w = world();
+    const first = cli(w, ['--conductor']);
+    expect(first.status).toBe(0);
+    expect(first.stdout).toContain('is now a conductor session');
+    expect(roleLabels(w)).toEqual([CONDUCTOR_ROLE_LABEL]);
+    const second = cli(w, ['--conductor']);
+    expect(second.status).toBe(0);
+    expect(second.stdout).toContain('already a conductor session');
+  });
+
+  test('--hook, on success: prints nothing, exits 0, and the label is there', () => {
+    const w = world();
+    expectSilentZero(
+      cli(w, ['--conductor', '--hook'], JSON.stringify({session_id: SESSION})),
+    );
+    expect(roleLabels(w)).toEqual([CONDUCTOR_ROLE_LABEL]);
+  });
+
+  test('--hook, with no session bead: prints nothing and exits 0', async () => {
+    const w = world();
+    const payload = JSON.stringify({session_id: NO_BEAD});
+    // The same call in-process: it is the no-bead path, not some other one.
+    expect(
+      (await markConductor({cwd: w.repo, env: w.env, hookPayload: payload}))
+        .kind,
+    ).toBe('noBead');
+    expectSilentZero(cli(w, ['--conductor', '--hook'], payload));
+    expect(roleLabels(w)).toEqual([]);
+  });
+
+  test('--hook, with an unreadable database: prints nothing and exits 0', async () => {
+    const w = world();
+    chmodSync(w.db, 0o000);
+    try {
+      const payload = JSON.stringify({session_id: SESSION});
+      expect(
+        (await markConductor({cwd: w.repo, env: w.env, hookPayload: payload}))
+          .kind,
+      ).toBe('failed');
+      expectSilentZero(cli(w, ['--conductor', '--hook'], payload));
+      // The mayor's hook on the same database still says so, with exit 1.
+      const mayor = cli(w, ['--mayor', '--hook'], payload);
+      expect(mayor.status).toBe(1);
+      expect(mayor.stderr).toContain('NOT marked');
+    } finally {
+      chmodSync(w.db, 0o644);
+    }
+    expect(roleLabels(w)).toEqual([]);
+  });
+
+  test.each([
+    ['not JSON', 'not json'],
+    ['empty', ''],
+    ['a subagent', JSON.stringify({agent_id: 'a1', session_id: SESSION})],
+  ])(
+    '--hook, with a payload that is %s: prints nothing, exits 0, marks nothing',
+    (_name, payload) => {
+      const w = world();
+      expectSilentZero(cli(w, ['--conductor', '--hook'], payload));
+      expect(roleLabels(w)).toEqual([]);
+    },
+  );
+
+  test('--mayor --conductor: the mayor wins, and the output says so', () => {
+    const w = world();
+    const both = cli(w, ['--mayor', '--conductor']);
+    expect(both.status).toBe(0);
+    expect(both.stdout).toContain('is now a mayor session');
+    expect(both.stdout).toContain(
+      `--conductor ignored: ${CONDUCTOR_ROLE_LABEL} was NOT written`,
+    );
+    expect(roleLabels(w)).toEqual([MAYOR_ROLE_LABEL]);
   });
 });

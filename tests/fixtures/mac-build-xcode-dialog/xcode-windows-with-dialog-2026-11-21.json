@@ -1,0 +1,158 @@
+[
+  {
+    "kCGWindowName": "",
+    "kCGWindowLayer": 0,
+    "kCGWindowMemoryUsage": 2432,
+    "kCGWindowIsOnscreen": true,
+    "kCGWindowSharingState": 1,
+    "kCGWindowOwnerPID": 52589,
+    "kCGWindowOwnerName": "Xcode",
+    "kCGWindowNumber": 2395,
+    "kCGWindowStoreType": 1,
+    "kCGWindowBounds": {
+      "X": 328,
+      "Height": 900,
+      "Y": 234,
+      "Width": 1400
+    },
+    "kCGWindowAlpha": 1
+  },
+  {
+    "kCGWindowName": "",
+    "kCGWindowLayer": 8,
+    "kCGWindowMemoryUsage": 2432,
+    "kCGWindowSharingState": 1,
+    "kCGWindowOwnerPID": 52589,
+    "kCGWindowOwnerName": "Xcode",
+    "kCGWindowNumber": 2391,
+    "kCGWindowStoreType": 1,
+    "kCGWindowBounds": {
+      "X": 898,
+      "Height": 282,
+      "Y": 291,
+      "Width": 260
+    },
+    "kCGWindowAlpha": 1
+  },
+  {
+    "kCGWindowName": "Apple Accounts",
+    "kCGWindowLayer": 0,
+    "kCGWindowMemoryUsage": 2432,
+    "kCGWindowIsOnscreen": true,
+    "kCGWindowSharingState": 1,
+    "kCGWindowOwnerPID": 52589,
+    "kCGWindowOwnerName": "Xcode",
+    "kCGWindowNumber": 2196,
+    "kCGWindowStoreType": 1,
+    "kCGWindowBounds": {
+      "X": 880,
+      "Height": 784,
+      "Y": 452,
+      "Width": 1060
+    },
+    "kCGWindowAlpha": 1
+  },
+  {
+    "kCGWindowName": "",
+    "kCGWindowLayer": 0,
+    "kCGWindowMemoryUsage": 2432,
+    "kCGWindowSharingState": 1,
+    "kCGWindowOwnerPID": 52589,
+    "kCGWindowOwnerName": "Xcode",
+    "kCGWindowNumber": 2170,
+    "kCGWindowStoreType": 1,
+    "kCGWindowBounds": {
+      "X": 0,
+      "Height": 39,
+      "Y": 0,
+      "Width": 2056
+    },
+    "kCGWindowAlpha": 1
+  },
+  {
+    "kCGWindowName": "",
+    "kCGWindowLayer": 0,
+    "kCGWindowMemoryUsage": 2432,
+    "kCGWindowSharingState": 1,
+    "kCGWindowOwnerPID": 52589,
+    "kCGWindowOwnerName": "Xcode",
+    "kCGWindowNumber": 2168,
+    "kCGWindowStoreType": 1,
+    "kCGWindowBounds": {
+      "X": 0,
+      "Height": 39,
+      "Y": 0,
+      "Width": 2056
+    },
+    "kCGWindowAlpha": 1
+  },
+  {
+    "kCGWindowName": "",
+    "kCGWindowLayer": 0,
+    "kCGWindowMemoryUsage": 2432,
+    "kCGWindowSharingState": 1,
+    "kCGWindowOwnerPID": 52589,
+    "kCGWindowOwnerName": "Xcode",
+    "kCGWindowNumber": 2167,
+    "kCGWindowStoreType": 1,
+    "kCGWindowBounds": {
+      "X": 0,
+      "Height": 39,
+      "Y": 0,
+      "Width": 2056
+    },
+    "kCGWindowAlpha": 1
+  },
+  {
+    "kCGWindowName": "",
+    "kCGWindowLayer": 8,
+    "kCGWindowMemoryUsage": 2432,
+    "kCGWindowIsOnscreen": true,
+    "kCGWindowSharingState": 1,
+    "kCGWindowOwnerPID": 52589,
+    "kCGWindowOwnerName": "Xcode",
+    "kCGWindowNumber": 2392,
+    "kCGWindowStoreType": 1,
+    "kCGWindowBounds": {
+      "X": 823,
+      "Height": 432,
+      "Y": 216,
+      "Width": 410
+    },
+    "kCGWindowAlpha": 1
+  },
+  {
+    "kCGWindowName": "DevHealthLogger — DevHealthLogger.xcworkspace",
+    "kCGWindowLayer": 0,
+    "kCGWindowMemoryUsage": 2432,
+    "kCGWindowSharingState": 1,
+    "kCGWindowOwnerPID": 52589,
+    "kCGWindowOwnerName": "Xcode",
+    "kCGWindowNumber": 2389,
+    "kCGWindowStoreType": 1,
+    "kCGWindowBounds": {
+      "X": 328,
+      "Height": 900,
+      "Y": 234,
+      "Width": 1400
+    },
+    "kCGWindowAlpha": 1
+  },
+  {
+    "kCGWindowName": "",
+    "kCGWindowLayer": 0,
+    "kCGWindowMemoryUsage": 2432,
+    "kCGWindowSharingState": 1,
+    "kCGWindowOwnerPID": 52589,
+    "kCGWindowOwnerName": "Xcode",
+    "kCGWindowNumber": 2169,
+    "kCGWindowStoreType": 1,
+    "kCGWindowBounds": {
+      "X": 0,
+      "Height": 39,
+      "Y": 0,
+      "Width": 2056
+    },
+    "kCGWindowAlpha": 1
+  }
+]

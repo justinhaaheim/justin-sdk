@@ -30,6 +30,7 @@ import {runAutoPickup} from '../src/thread/handoff-auto-pickup-run';
 import {walkedSessionMarks} from '../src/thread/handoff-marks';
 import {
   continuationLabels,
+  continuationRoleLabels,
   handoffNumberOf,
   mayorSuccessorSentence,
   successorMarks,
@@ -47,7 +48,11 @@ import {
   TYPED_COMMAND_BYTE_LIMIT,
   typedCommandBytes,
 } from '../src/thread/respawn';
-import {ensureSessionBead, MAYOR_ROLE_LABEL} from '../src/thread/session-bead';
+import {
+  CONDUCTOR_ROLE_LABEL,
+  ensureSessionBead,
+  MAYOR_ROLE_LABEL,
+} from '../src/thread/session-bead';
 import {
   handOff,
   healChainName,
@@ -524,6 +529,53 @@ describe('D4: continuationLabels', () => {
   });
 });
 
+describe('home-base-eq5oy C3, C4: continuationRoleLabels', () => {
+  test('a mayor passes on its label, and takes a conductor label off', () => {
+    expect(continuationRoleLabels([MAYOR_ROLE_LABEL], [])).toEqual({
+      add: [MAYOR_ROLE_LABEL],
+      remove: [],
+    });
+    expect(
+      continuationRoleLabels([MAYOR_ROLE_LABEL], [CONDUCTOR_ROLE_LABEL]),
+    ).toEqual({add: [MAYOR_ROLE_LABEL], remove: [CONDUCTOR_ROLE_LABEL]});
+    // Not known: removed anyway, since br accepts removing an absent label.
+    expect(continuationRoleLabels([MAYOR_ROLE_LABEL], null)).toEqual({
+      add: [MAYOR_ROLE_LABEL],
+      remove: [CONDUCTOR_ROLE_LABEL],
+    });
+  });
+
+  test('a conductor passes on its label, unless the successor is a mayor', () => {
+    expect(continuationRoleLabels([CONDUCTOR_ROLE_LABEL], [])).toEqual({
+      add: [CONDUCTOR_ROLE_LABEL],
+      remove: [],
+    });
+    expect(continuationRoleLabels([CONDUCTOR_ROLE_LABEL], null)).toEqual({
+      add: [CONDUCTOR_ROLE_LABEL],
+      remove: [],
+    });
+    expect(
+      continuationRoleLabels([CONDUCTOR_ROLE_LABEL], [MAYOR_ROLE_LABEL]),
+    ).toEqual({add: [], remove: []});
+  });
+
+  test('an ordinary session passes on no role', () => {
+    expect(continuationRoleLabels(['session'], [CONDUCTOR_ROLE_LABEL])).toEqual(
+      {add: [], remove: []},
+    );
+  });
+
+  test('continuationLabels puts the conductor label where the mayor label goes', () => {
+    expect(
+      continuationLabels({
+        oldBeadId: 't-a',
+        oldLabels: [CONDUCTOR_ROLE_LABEL],
+        oldNumber: {kind: 'known', number: 1},
+      }),
+    ).toEqual(['continues:t-a', `${NUMBER_LABEL}2`, CONDUCTOR_ROLE_LABEL]);
+  });
+});
+
 describe('D9: successorMarks', () => {
   test('its own number plus 1, and [#?] when unknown', () => {
     expect(successorMarks([], {kind: 'known', number: 0})).toEqual({
@@ -897,6 +949,79 @@ describe('D4: every link path stamps the number and the mayor in one write', () 
   });
 });
 
+describe('home-base-eq5oy C3: a conductor`s successor is a conductor after pickup', () => {
+  test('the pickup writes session-role:conductor in the one write with continues:', async () => {
+    const w = world([A, B]);
+    addLabels(w, A, [CONDUCTOR_ROLE_LABEL]);
+    const outcome = await pickUpHandoff(
+      {
+        cwd: w.repo,
+        env: w.env,
+        predecessorBeadId: beadOf(w, A),
+        successor: {beadId: beadOf(w, B), db: w.db, sessionId: B},
+      },
+      {syncNames: () => Promise.resolve(null)},
+    );
+    expect(outcome.kind).toBe('picked-up');
+    expectOneWrite(w, beadOf(w, A), [`${NUMBER_LABEL}1`, CONDUCTOR_ROLE_LABEL]);
+    expect(labelsOf(w, B)).toContain(CONDUCTOR_ROLE_LABEL);
+    expect(labelsOf(w, B)).not.toContain(MAYOR_ROLE_LABEL);
+  });
+
+  test('a chain keeps the role after its second handoff (thread handoff --to path)', () => {
+    const w = world([A, B, C]);
+    addLabels(w, A, [CONDUCTOR_ROLE_LABEL]);
+    link(w, A, B);
+    link(w, B, C);
+    expect(labelsOf(w, C)).toContain(CONDUCTOR_ROLE_LABEL);
+  });
+
+  test('an ordinary session passes on no conductor label', () => {
+    const w = world([A, B]);
+    link(w, A, B);
+    expect(labelsOf(w, B)).not.toContain(CONDUCTOR_ROLE_LABEL);
+  });
+});
+
+describe('home-base-eq5oy C4 at the link: one role, and the mayor wins', () => {
+  test('a conductor`s successor that is already a mayor gets no conductor label', async () => {
+    const w = world([A, B]);
+    addLabels(w, A, [CONDUCTOR_ROLE_LABEL]);
+    addLabels(w, B, [MAYOR_ROLE_LABEL]);
+    const outcome = await pickUpHandoff(
+      {
+        cwd: w.repo,
+        env: w.env,
+        predecessorBeadId: beadOf(w, A),
+        successor: {beadId: beadOf(w, B), db: w.db, sessionId: B},
+      },
+      {syncNames: () => Promise.resolve(null)},
+    );
+    expect(outcome.kind).toBe('picked-up');
+    expect(labelsOf(w, B)).toContain(MAYOR_ROLE_LABEL);
+    expect(labelsOf(w, B)).not.toContain(CONDUCTOR_ROLE_LABEL);
+  });
+
+  test('the same, through linkContinuation with no labels passed (it reads them)', () => {
+    const w = world([A, B]);
+    addLabels(w, A, [CONDUCTOR_ROLE_LABEL]);
+    addLabels(w, B, [MAYOR_ROLE_LABEL]);
+    link(w, A, B);
+    expect(labelsOf(w, B)).not.toContain(CONDUCTOR_ROLE_LABEL);
+  });
+
+  test('a mayor`s successor that was marked conductor loses that label in the link`s one write', () => {
+    const w = world([A, B]);
+    addLabels(w, A, [MAYOR_ROLE_LABEL]);
+    addLabels(w, B, [CONDUCTOR_ROLE_LABEL]);
+    link(w, A, B);
+    expect(labelsOf(w, B)).toContain(MAYOR_ROLE_LABEL);
+    expect(labelsOf(w, B)).not.toContain(CONDUCTOR_ROLE_LABEL);
+    const [write] = linkWrites(w, beadOf(w, A));
+    expect(write).toContain(`--remove-label=${CONDUCTOR_ROLE_LABEL}`);
+  });
+});
+
 describe('D8: the handoff block`s pick-up section', () => {
   const blockOf = async (w: World): Promise<string> => {
     const outcome = await handOff({
@@ -986,6 +1111,18 @@ describe('D5: the self-heal', () => {
     if (first.kind !== 'stamped') throw new Error('not stamped');
     expect(first.labels).toContain(`${NUMBER_LABEL}1`);
     expect(heal(w, B)).toEqual({kind: 'current'});
+  });
+
+  test('home-base-1vcgs.1 F3: a replacement successor healed later takes 1 + the highest in the chain, not its predecessor`s first successor`s number', () => {
+    const w = world([A, B, C]);
+    // A was continued by B (#1, stamped by the link), then resumed and
+    // handed off again to C, whose link could not read a number.
+    link(w, A, B);
+    expect(labelsOf(w, B)).toContain(`${NUMBER_LABEL}1`);
+    addLabels(w, C, [`continues:${beadOf(w, A)}`]);
+    addLabels(w, A, [`continued-by:${beadOf(w, C)}`]);
+    expect(heal(w, C)).toMatchObject({kind: 'stamped', number: 2});
+    expect(labelsOf(w, C)).toContain(`${NUMBER_LABEL}2`);
   });
 
   test('a first session is left alone, and writes nothing', () => {

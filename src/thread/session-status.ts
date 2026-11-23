@@ -60,6 +60,7 @@
  * the message Claude is about to yield as the last one.
  */
 
+import type {StepBead, StepRead} from './chain-step';
 import type {ExportBehind} from './export-behind';
 import type {PickupState} from './handoff-auto-pickup';
 import type {SessionCommits} from './session-commits';
@@ -70,6 +71,7 @@ import type {RequestNode, SessionTree, TreeIssue} from './session-tree';
 import {formatLocalDate, formatLocalTime} from '../date';
 import {parseInstant} from './answer-store';
 import {ARCHIVED_PREFIX, ASK_LABEL, DONE_PREFIX} from './ask-format';
+import {newestSuccessor, successorsOf} from './chain-step';
 import {handedOffAtOf} from './handoff-view';
 import {isOverarching, overarchingSetAt, pickOverarching} from './overarching';
 import {
@@ -434,6 +436,35 @@ export function deriveStatus(
   return {kind: 'openWork'};
 }
 
+/** Whether a session is working at this moment (home-base-1vcgs D2). */
+export type LiveActivity =
+  | {kind: 'stopped'}
+  | {kind: 'unknown'; reasons: string[]}
+  | {kind: 'working'; lastRecordAt: string};
+
+/**
+ * home-base-1vcgs D2: working, stopped or unknown, from the same facts and the
+ * same rule as the inbox's 🏃 Working (deriveStatus, read with no open P0 so a
+ * waiting question cannot hide a turn in progress). Unknown is a helper gone
+ * quiet, or activity that could not be measured: never read as stopped.
+ */
+export function liveActivityOf(facts: StatusFacts, now: Date): LiveActivity {
+  const derived = deriveStatus(
+    {...facts, openP0: 0},
+    {asIfYielded: false, now},
+  );
+  if (derived.kind === 'working') {
+    return {kind: 'working', lastRecordAt: derived.lastRecordAt};
+  }
+  const reasons = [
+    ...activityProblems(facts),
+    ...quietHelpers(facts.helpersInFlight, now).map(quietHelperReason),
+  ];
+  return reasons.length > 0
+    ? {kind: 'unknown', reasons: [...new Set(reasons)]}
+    : {kind: 'stopped'};
+}
+
 // ---------------------------------------------------------------------------
 // From the model
 // ---------------------------------------------------------------------------
@@ -527,6 +558,27 @@ export function statusFactsOf(model: SessionModel): StatusFacts {
       : unmeasured(git.uncommitted.reason),
     wrapUpAt: model.wrapUpAt,
   };
+}
+
+/**
+ * home-base-1vcgs.1 F2: `facts.successor` for a session bead that names two or
+ * more `continued-by:` successors. statusFactsOf takes the first label, and
+ * label order is not creation order, so "Handed off to" and `claude --resume`
+ * could name the older session. This gives the newest by chain-step.ts's one
+ * rule (`newestSuccessor`). When the newest cannot be established, the
+ * successor is null: the card then names no session and points at `thread
+ * show`, never at a guess (rule 7). A bead with fewer than two successors is
+ * returned as it is, with no read.
+ */
+export function withNewestSuccessor(
+  facts: StatusFacts,
+  labels: readonly string[],
+  readBead: (beadId: string) => StepRead<StepBead>,
+): StatusFacts {
+  const successors = successorsOf(labels);
+  if (successors.length < 2) return facts;
+  const newest = newestSuccessor(successors, readBead);
+  return {...facts, successor: newest.kind === 'newest' ? newest.id : null};
 }
 
 /** What sits beside the status: never part of it (D2). */

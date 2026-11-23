@@ -48,7 +48,7 @@ EXIT CODES, and what you do after each.
 
   1  A step failed. The output says what WAS done: whether the session was handed off, where the block is, whether a tab opened. Finish your report, quote that output for Justin, and stop. Do not run thread handoff again.
 
-  2  Nothing was written: the message says why. Fix the call if a flag was wrong, or if it says the call ran inside the Claude Code sandbox (cmux answered Operation not permitted), and run it once more; if exit 2 comes back again, put the output in your final report and stop. Never set dangerouslyDisableSandbox for it.
+  2  Nothing was written: the message says why. Fix the call if a flag was wrong, or if it says the call ran inside the Claude Code sandbox (cmux answered Operation not permitted), and run it once more; if exit 2 comes back again, put the output in your final report and stop. Never set dangerouslyDisableSandbox for it. It is also exit 2 when a session that already continues this one is working now, or its state cannot be read: nothing was written and no tab was opened; continue in that session (the message gives its resume command), or run this again once it has stopped. A successor that has stopped does not refuse: the handoff says this session was already continued by it, and the new successor becomes the newest.
 
   3  The gate refused. The session WAS handed off and the refusal is recorded; nothing was opened. This is final: finish your report, include the printed handoff block for Justin, and stop. Never start a session another way: no cmux command, no claude command.
 
@@ -672,9 +672,16 @@ status in_progress. Run it as soon as he asks for work — one command, no form.
       at any time: a run after a failure finishes the rest, and a run that
       finds it all done writes nothing. While a running process holds this
       session's lock (the capture hook's background run), it says so on
-      stderr and waits for it, up to 90 s, then runs. Each session has one successor: when
-      another session already continues the old one, nothing is linked or
-      carried, this session is labelled not-a-successor, and the exit code is 2.
+      stderr and waits for it, up to 90 s, then runs. Each handoff has one successor: when
+      another session already continues the old one and the old one has not
+      handed off again since that session was created (a /clear inside the
+      successor, or a second session from the same kickoff), nothing is linked
+      or carried, this session is labelled not-a-successor, and the exit code
+      is 2. When the old one did hand off again after it (it was resumed and
+      handed off a second time), this session is linked as its newest
+      successor and takes over its work; every chain reader then follows the
+      successor created last. When those times cannot be read, nothing is
+      written and the exit code is 1: run it again.
       Each session has one predecessor: when this session already continues
       another one, it is refused, naming that one, nothing is written, and the
       exit code is 2. Running it for the one it already continues stays safe.
@@ -760,6 +767,13 @@ Run it BEFORE YIELDING on a work turn (status report v4). It prints, in order:
       is still undecided — or "Nothing to mark." When stopping would leave
       ⚠️ open work, one entry per open request: close it (work done) or
       file the P0 that blocks it / hand off (not done).
+      An open question of this session whose named work moved after it was
+      filed gets "⚠️ Q<n> names <bead>, closed <date> …": a bead its --to
+      names, or any bead id in its text with a known beads prefix, that was
+      closed after the question, or is open with a stage: label and was
+      updated after it. Check the question still holds, then restate it
+      (thread ask) or close it. A named bead that could not be read is one
+      "⚠️ Could not check …" line, never silence (home-base-5uu56.2.5).
       When a request is finished: br close <id> --reason "…". Your open
       questions to Justin never keep it open. A change is finished when it
       exists or Justin declines it; a question when the answer is in your
@@ -1653,12 +1667,18 @@ export const threadCommand: CommandModule = {
       )
       .command(
         'mark',
-        'Mark this session as a mayor session (--mayor): label its bead session-role:mayor and run the workspace name follow-up, so cmux shows [MAYOR] at once. Safe to run again: a bead that has the label gets no write. It always acts on the session it runs in. Exit 0 the mark holds, or --hook and a subagent · 1 not marked, including no session bead yet (a bead is filed in the background after the first prompt), so run it again in a moment · 2 no mark named.',
+        'Mark this session as a mayor session (--mayor): label its bead session-role:mayor and run the workspace name follow-up, so cmux shows [MAYOR] at once. Or as a conductor session (--conductor): label it session-role:conductor, so its handoff block gets the reading line where componentConfig.thread.handoff.readMessages is on; no name changes. A session never carries both roles, and the mayor wins: --conductor on a mayor session writes nothing and says so, and --mayor removes session-role:conductor. Safe to run again: a bead that has the label gets no write. It always acts on the session it runs in. Exit 0 the mark holds, or --hook and a subagent · 1 not marked, including no session bead yet (a bead is filed in the background after the first prompt), so run it again in a moment · 2 no mark named. --conductor --hook prints nothing and exits 0 on every path, for the conductor skill’s Stop hook.',
         (yy) =>
           yy
             .option('mayor', {
               default: false,
               describe: 'The mark: this session is a mayor session',
+              type: 'boolean' as const,
+            })
+            .option('conductor', {
+              default: false,
+              describe:
+                'The mark: this session is a conductor session (session-role:conductor). With --mayor too, the mayor wins',
               type: 'boolean' as const,
             })
             .option('hook', {
@@ -1671,6 +1691,7 @@ export const threadCommand: CommandModule = {
           const {runThreadMark} = await import('./mark-mayor');
           process.exit(
             await runThreadMark({
+              conductor: argv.conductor === true,
               hook: argv.hook === true,
               mayor: argv.mayor === true,
             }),

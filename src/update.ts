@@ -69,6 +69,13 @@ export interface UpdateOptions {
   projectRoot?: string;
   quiet?: boolean;
   /**
+   * The remote `stepDepsHasSdk` verifies the pin tag against, forwarded to the
+   * reconcile step's `install`. Absent in production: base-setup falls back to
+   * the real SDK_REPO_URL. A test passes a local bare repo, so the real `git
+   * ls-remote` runs without reaching GitHub (dchjw.17 F7, home-base-ejsq2.9).
+   */
+  sdkRepoUrl?: string;
+  /**
    * Test seams for the self-update: the tag lookup and the bump command.
    * Absent in production, where the real `git ls-remote` and `bun add` run.
    */
@@ -248,6 +255,7 @@ export async function runUpdate(options: UpdateOptions = {}): Promise<number> {
     force,
     projectRoot,
     quiet,
+    ...(options.sdkRepoUrl == null ? {} : {sdkRepoUrl: options.sdkRepoUrl}),
   });
   setQuiet(quiet);
   if (installExit !== 0) {

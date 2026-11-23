@@ -263,6 +263,9 @@ export const ALL_COMMANDS = [
   'session-start',
   'setup-env',
   'signal',
+  // Tier 4, like mac-build: it runs in front of a build, at most once per
+  // build, and its notices go to stderr (home-base-di8c7.1).
+  'signing-guard',
   'skill',
   'sweep',
   'sync-rules',

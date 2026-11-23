@@ -29,6 +29,7 @@ import {join} from 'path';
 import {PLAIN_STYLE} from '../src/cli-style';
 import {runPlanCommand} from '../src/worktree-retire/plan';
 import {
+  foreignProcessCheck,
   parseLsofFields,
   processesInside,
   readLsof,
@@ -577,4 +578,48 @@ describe('the process check', () => {
       child.kill();
     }
   }, 30_000);
+
+  // home-base-pp1vx.1.1.5 F5. Shapes measured 2026-11-21: inside the Claude
+  // Code sandbox lsof listed zsh (the parent), bun and lsof, and nothing else.
+  test('a listing of only our own process tree is refused, as the sandbox gives it', () => {
+    const sandboxed = parseLsofFields(
+      'p500\nR400\nczsh\nfcwd\nn/r\np600\nR500\ncbun\nfcwd\nn/r\np700\nR600\nclsof\nfcwd\nn/r\n',
+    );
+    expect(sandboxed[0]?.ppid).toBe(400);
+    expect(foreignProcessCheck(sandboxed, 600)).toContain('only this process');
+  });
+
+  // home-base-pp1vx.1.1.9 R4: a daemon our own sandboxed command started
+  // reparents to pid 1 and sits outside our tree; one of those proves nothing.
+  const ours =
+    'p500\nR400\nczsh\nfcwd\nn/r\np600\nR500\ncbun\nfcwd\nn/r\np700\nR600\nclsof\nfcwd\nn/r\n';
+  const others = (n: number) =>
+    Array.from(
+      {length: n},
+      (_, i) => `p${1000 + i}\nR1\ncother\nfcwd\nn/\n`,
+    ).join('');
+
+  test('one reparented daemon of our own is not enough to trust the listing', () => {
+    const daemon = parseLsofFields(`${ours}p800\nR1\ncgit\nfcwd\nn/r\n`);
+    expect(foreignProcessCheck(daemon, 600)).toContain('only this process');
+    expect(
+      foreignProcessCheck(parseLsofFields(ours + others(9)), 600),
+    ).toContain('fewer than 10');
+  });
+
+  test('ten processes outside our tree, or pid 1, make the listing trusted', () => {
+    const full = parseLsofFields(ours + others(10));
+    expect(foreignProcessCheck(full, 600)).toBeNull();
+    const root = parseLsofFields(
+      'p1\nR0\nclaunchd\nfcwd\nn/\np600\nR1\ncbun\nfcwd\nn/r\n',
+    );
+    expect(foreignProcessCheck(root, 600)).toBeNull();
+  });
+
+  test('a listing with no parent pid for this process is refused', () => {
+    const noR = parseLsofFields(
+      'p181\ncloginwindow\nfcwd\nn/\np600\ncbun\nfcwd\nn/r\n',
+    );
+    expect(foreignProcessCheck(noR, 600)).toContain('no parent pid');
+  });
 });

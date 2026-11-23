@@ -176,6 +176,8 @@ export function handedOffAtOf(
 // ---------------------------------------------------------------------------
 
 export interface ChainViewBead {
+  /** br's created_at, for the newest of two successors (home-base-1vcgs D3). */
+  createdAt?: null | string;
   id: string;
   labels: readonly string[];
   notes: string | null;
@@ -395,6 +397,7 @@ export function realChainViewReaders(input: {
       }
       return {
         bead: {
+          createdAt: shown.issue.createdAt,
           id: shown.issue.id,
           labels: shown.issue.labels,
           notes: shown.issue.notes,

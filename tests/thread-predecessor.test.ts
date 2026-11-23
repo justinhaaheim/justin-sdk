@@ -50,7 +50,7 @@ import {runThreadPrepare} from '../src/thread/prepare';
 import {compactStoredReport} from '../src/thread/render-markdown';
 import {runThreadReport} from '../src/thread/report';
 import {createFakeBd, type FakeIssue, type FakeState} from './fake-bd';
-import {examplePayload} from './thread-schema.test';
+import {examplePayload} from './thread-schema-example';
 
 const OLD_SESSION = 'sess-old-uuid-0001';
 const OLD_THREAD = 'jl-old';

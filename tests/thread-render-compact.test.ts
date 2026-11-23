@@ -36,7 +36,7 @@ import {
   FULL_LAST_MESSAGE_CAP,
 } from '../src/thread/report-model';
 import {validateThreadReport} from '../src/thread/schema';
-import {examplePayload} from './thread-schema.test';
+import {examplePayload} from './thread-schema-example';
 
 function facts(overrides: Partial<ThreadFacts> = {}): ThreadFacts {
   return {

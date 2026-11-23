@@ -18,6 +18,7 @@ import {
 import {join} from 'path';
 
 import {planUpdateReExec, runUpdate} from '../src/update';
+import {sdkRemoteWithOwnTag} from './git-fixtures';
 import {createProjectSandbox, createSandbox, type Sandbox} from './sandbox';
 import {
   captureConsole,
@@ -405,11 +406,17 @@ describe('runUpdate (config integrity)', () => {
     // Make tree clean by avoiding git entirely; runUpdate's git status
     // call exits non-zero (no .git), which leaves treeWasDirty=false.
 
+    // The install step chains base-setup, whose pin check runs a real `git
+    // ls-remote`. `sdkRepoUrl` points it at a local bare remote holding this
+    // SDK's tag (home-base-ejsq2.9). Against github it was one call a run,
+    // which took 4,996 ms and failed this test on bun's 5 s limit on
+    // 2026-11-14 (home-base-ejsq2.5).
     const exitCode = await runUpdate({
       noCommit: true,
       noSelfUpdate: true,
       projectRoot: sb.path,
       quiet: true,
+      sdkRepoUrl: sdkRemoteWithOwnTag(track),
     });
 
     expect(exitCode).toBe(0);

@@ -58,7 +58,10 @@ import type {ResolvedHandoffConfig} from './handoff-knob';
 import type {HandoffNumber} from './handoff-number';
 import type {HandoffSummaryTab} from './handoff-summary';
 import type {EnvLike} from './paths';
-import type {HandoffRequestCount} from './session-handoff';
+import type {
+  HandoffRequestCount,
+  SuccessorActivityReader,
+} from './session-handoff';
 import type {FoundSession} from './session-select';
 
 import {mkdirSync, writeFileSync} from 'node:fs';
@@ -117,9 +120,12 @@ import {
 } from './respawn';
 import {CONTINUES_ENV} from './session-bead';
 import {
+  checkNamedSuccessors,
   describeHandoffOutcome,
+  earlierSuccessorsLine,
   handOff,
   realHandoffNumberReaders,
+  realSuccessorActivity,
 } from './session-handoff';
 import {
   SESSION_NAME_LIMIT,
@@ -468,6 +474,11 @@ export interface HandoffSuccessorDeps {
   clock: () => number;
   gate: HandoffGateRunner;
   handOff: typeof handOff;
+  /**
+   * home-base-1vcgs D2: whether a successor this session already names is
+   * working now. Absent: realSuccessorActivity.
+   */
+  readSuccessorActivity?: SuccessorActivityReader;
   /** home-base-89c8h.1 D6: the handoff-deferred label and note. */
   recordDeferral: typeof recordDeferral;
   /** F11: the launch record on the caller's bead, before new-surface. */
@@ -624,6 +635,20 @@ export async function handoffWithSuccessor(
   if (selected.kind !== 'found') return refuse(selected.reason);
   const {session} = selected;
 
+  // home-base-1vcgs D2: a successor this session already names and that is
+  // working now (or cannot be read) refuses here, before the gate, the
+  // writes and the tab. handOff() below is told it was checked.
+  const named = await checkNamedSuccessors({
+    beadId: session.bead.id,
+    labels: session.bead.labels,
+    read: d.readSuccessorActivity ?? realSuccessorActivity({cwd, env, now}),
+  });
+  if (named.kind === 'refuse' && !options.dryRun) return refuse(named.reason);
+  const earlierLine =
+    named.kind === 'clear'
+      ? earlierSuccessorsLine('This session', named.earlier)
+      : null;
+
   // ---- the plan: every path and word, before anything is written ----
   const blockPath = join(
     threadsStateDir(env),
@@ -744,6 +769,16 @@ export async function handoffWithSuccessor(
             },
           ]
         : []),
+      ...(named.kind === 'refuse'
+        ? [
+            {
+              label: 'Successors',
+              value: `a real run would refuse: ${named.reason}`,
+            },
+          ]
+        : earlierLine == null
+          ? []
+          : [{label: 'Successors', value: earlierLine}]),
       {label: 'Session bead', value: session.bead.id},
       {label: 'Block file', value: blockPath},
       {label: 'Successor name', value: name},
@@ -826,6 +861,7 @@ export async function handoffWithSuccessor(
   }): Promise<ThreadHandoffResult> => {
     const lines: string[] = [];
     const handed = await d.handOff({
+      checkSuccessors: false,
       cwd,
       env,
       note: options.note,
@@ -833,6 +869,7 @@ export async function handoffWithSuccessor(
       sessionId: null,
       to: null,
     });
+    if (handed.kind === 'refused') return refuse(handed.reason);
     if (handed.kind === 'failed' && saysBeadsLocked(handed.reason)) {
       return beadsLockedDeferral(handed.reason);
     }
@@ -843,6 +880,7 @@ export async function handoffWithSuccessor(
       );
     } else {
       if (handed.block !== '') lines.push(handed.block, '');
+      if (earlierLine != null) lines.push(earlierLine, '');
       for (const failure of handed.followUpFailures) {
         lines.push(`⚠️ The session WAS marked handed off, but: ${failure}`);
       }
@@ -938,6 +976,7 @@ export async function handoffWithSuccessor(
 
   // ---- 4. the handoff, then the block file ----
   const handed = await d.handOff({
+    checkSuccessors: false,
     cwd,
     env,
     note: options.note,
@@ -945,6 +984,7 @@ export async function handoffWithSuccessor(
     sessionId: null,
     to: null,
   });
+  if (handed.kind === 'refused') return refuse(handed.reason);
   if (handed.kind === 'failed' && saysBeadsLocked(handed.reason)) {
     return beadsLockedDeferral(handed.reason);
   }
@@ -1090,6 +1130,7 @@ export async function handoffWithSuccessor(
           : `⚠️ not marked handed off: ${marked.reason}`,
     },
     {label: 'Workspace', value: workspaceId},
+    ...(earlierLine == null ? [] : [{label: 'Successors', value: earlierLine}]),
   ];
 
   // 8. mbnjv.4 (D6, C6): exit or close the caller's own tab, but only from a

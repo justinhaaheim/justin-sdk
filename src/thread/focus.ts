@@ -80,6 +80,8 @@ import {
 
 /** One session bead, with the DB it was found in (the reverse query asks it). */
 export interface FocusBead {
+  /** br's created_at, for the newest of two successors (home-base-1vcgs D3). */
+  createdAt?: null | string;
   db: string;
   id: string;
   labels: readonly string[];
@@ -868,6 +870,7 @@ export function realFocusReaders(input: {
       // doubled the br runs of every step of the walk and told nothing new.
       return {
         bead: {
+          createdAt: located.createdAt ?? null,
           db: located.db,
           id: located.id,
           labels: located.labels,
