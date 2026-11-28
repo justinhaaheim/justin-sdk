@@ -30,6 +30,7 @@ import {
 import {answersDeliveredPath, messageLogPath} from '../src/thread/archive';
 import {describeAskOutcome, fileAsk, validateAsk} from '../src/thread/ask';
 import {
+  DEFAULT_JUDGED_LABEL,
   P0_NO_DEFAULT,
   P4_NO_DEFAULT,
   parseAsk,
@@ -599,7 +600,14 @@ describe('thread ask (real br)', () => {
     expect(issue.priority).toBe(2);
     // home-base-4wfoz D2: its id, the first the machine-wide counter hands
     // out (this test's state dir starts empty).
-    expect(issue.labels.sort()).toEqual(['ask', 'qid:100', `sid:${SESSION}`]);
+    // home-base-nt6em.5.1 F2: a question with a text default says it was
+    // filed where a default could be marked risky.
+    expect(issue.labels.sort()).toEqual([
+      'ask',
+      DEFAULT_JUDGED_LABEL,
+      'qid:100',
+      `sid:${SESSION}`,
+    ]);
     expect(outcome.shortId).toBe('Q100');
     expect(issue.title).toBe(VALID.question);
     expect(issue.id.startsWith(`${w.sessionBead}.`)).toBe(true);
@@ -626,12 +634,37 @@ describe('thread ask (real br)', () => {
     if (outcome.kind !== 'filed') return;
     expect(show(w, outcome.id).labels.sort()).toEqual([
       'ask',
+      DEFAULT_JUDGED_LABEL,
       'qid:100',
       RISKY_DEFAULT_LABEL,
       `sid:${SESSION}`,
     ]);
     // The grammar is unchanged: the description still parses.
     expect(parseAsk(show(w, outcome.id).description).ok).toBe(true);
+  });
+
+  test('[F2] default-judged goes on every question with a default, and on none without one (home-base-nt6em.5.1)', async () => {
+    const w = world();
+    const p3 = await ask(w, {priority: '3'});
+    const p4 = await ask(w, {
+      default: '',
+      options: [],
+      priority: '4',
+      recommend: '',
+    });
+    const p0 = await ask(w, {
+      default: '',
+      options: [],
+      priority: '0',
+      recommend: '',
+    });
+    expect([p3.kind, p4.kind, p0.kind]).toEqual(['filed', 'filed', 'filed']);
+    if (p3.kind !== 'filed' || p4.kind !== 'filed' || p0.kind !== 'filed') {
+      return;
+    }
+    expect(show(w, p3.id).labels).toContain(DEFAULT_JUDGED_LABEL);
+    expect(show(w, p4.id).labels).not.toContain(DEFAULT_JUDGED_LABEL);
+    expect(show(w, p0.id).labels).not.toContain(DEFAULT_JUDGED_LABEL);
   });
 
   test("links the session's ONLY in-progress request by label (the parent stays the session bead); with two, links none and says why", async () => {

@@ -45,6 +45,7 @@ import {
 import {outputStyle} from '../cli-style';
 import {
   ASK_LABEL,
+  DEFAULT_JUDGED_LABEL,
   HEADER_MAX,
   oneLine,
   optionIndex,
@@ -454,6 +455,7 @@ export async function fileAsk(
   }
 
   const labels = [ASK_LABEL, sidLabel(session.id)];
+  if (valid.fields.default.kind === 'text') labels.push(DEFAULT_JUDGED_LABEL);
   if (valid.riskyDefault) labels.push(RISKY_DEFAULT_LABEL);
   if (request != null) {
     const link = toLabelFor(request.id);

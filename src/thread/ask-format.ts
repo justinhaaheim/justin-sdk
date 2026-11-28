@@ -54,6 +54,15 @@ export const QUESTION_BEAD_TYPE = 'question';
  */
 export const RISKY_DEFAULT_LABEL = 'risky-default';
 
+/**
+ * home-base-nt6em.5.1 F2: `thread ask` puts this label on EVERY question it
+ * files that has a default, marked risky or not. It means "filed by an SDK in
+ * which a default could be marked risky", so a reader can tell a default that
+ * was judged from one filed where `--risky-default` did not exist. A date
+ * cannot tell them apart: a repo pinning an older SDK files questions today.
+ */
+export const DEFAULT_JUDGED_LABEL = 'default-judged';
+
 /** Close reasons — the v4 answer store is the bead's close reason, never a comment (critical rule 3.2). */
 export const ANSWER_PREFIX = 'answer: ';
 export const DEFAULT_TAKEN_PREFIX = 'default taken — ';
