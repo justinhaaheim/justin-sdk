@@ -45,6 +45,15 @@
 export const ASK_LABEL = 'ask';
 export const QUESTION_BEAD_TYPE = 'question';
 
+/**
+ * home-base-nt6em.5.1 D4: `thread ask --risky-default` labels the question
+ * this way when its default deletes, publishes, spends, touches a real account
+ * or cannot be undone cheaply. home-base's `session-restart` never restarts a
+ * session on such a default. A label, not a description line, so the grammar
+ * below is unchanged and every older question still parses.
+ */
+export const RISKY_DEFAULT_LABEL = 'risky-default';
+
 /** Close reasons — the v4 answer store is the bead's close reason, never a comment (critical rule 3.2). */
 export const ANSWER_PREFIX = 'answer: ';
 export const DEFAULT_TAKEN_PREFIX = 'default taken — ';

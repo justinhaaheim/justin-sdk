@@ -13,6 +13,7 @@ import {afterEach, describe, expect, spyOn, test} from 'bun:test';
 import {mkdirSync, readFileSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
+import {FILE_AUDIT_HOOK_COMMAND, stepClaudeSettings} from '../src/base-setup';
 import {brShow, runBr} from '../src/beads/br';
 import {checkSdkHookEntries} from '../src/hook-entries-check';
 import {handlersByKnob} from '../src/hook-knobs';
@@ -920,6 +921,9 @@ describe('install and doctor follow the knob (AC4)', () => {
       lines.push(String(line));
     });
     try {
+      // base-setup first, as every installer runs it: since the file-access
+      // audit log (home-base-n1qy7.15.1) it writes a PreToolUse entry too.
+      expect(stepClaudeSettings(root)).toBe(true);
       expect(stepThreadHooks(root, handlersByKnob(root, env))).toBe(true);
     } finally {
       spy.mockRestore();
@@ -954,15 +958,20 @@ describe('install and doctor follow the knob (AC4)', () => {
 
   const CLEAN = {doubleRuns: [], extra: [], missing: [], stale: []};
 
-  test('knob on, dispatch on: the PreToolUse dispatcher entry, matcher Bash; doctor agrees', () => {
+  // The file-access audit hook (home-base-n1qy7.15.1, no knob) is on
+  // PreToolUse for every tool in every repo, so the dispatcher entry matches
+  // every tool and is there whatever this knob says.
+  const AUDIT_ENTRY = {
+    hooks: [{command: FILE_AUDIT_HOOK_COMMAND, type: 'command'}],
+  };
+  const DISPATCH_ENTRY = {
+    hooks: [{command: dispatchCommand('PreToolUse'), type: 'command'}],
+  };
+
+  test('knob on, dispatch on: the PreToolUse dispatcher entry, every tool; doctor agrees', () => {
     const {env, root} = repo({dispatch: true, successor: true});
     install(root, env);
-    expect(preToolUse(root)).toEqual([
-      {
-        hooks: [{command: dispatchCommand('PreToolUse'), type: 'command'}],
-        matcher: 'Bash',
-      },
-    ]);
+    expect(preToolUse(root)).toEqual([DISPATCH_ENTRY]);
     expect(doctor(root, env)).toEqual(CLEAN);
     expect(guardRegistration({env, roots: [root]}).kind).toBe('registered');
   });
@@ -971,6 +980,7 @@ describe('install and doctor follow the knob (AC4)', () => {
     const {env, root} = repo({dispatch: false, successor: true});
     install(root, env);
     expect(preToolUse(root)).toEqual([
+      AUDIT_ENTRY,
       {
         hooks: [{command: THREAD_GUARD_HOOK_COMMAND, type: 'command'}],
         matcher: 'Bash',
@@ -983,43 +993,53 @@ describe('install and doctor follow the knob (AC4)', () => {
   for (const dispatch of [true, false]) {
     const mode = dispatch ? 'on' : 'off';
 
-    test(`knob off, dispatch ${mode}: no PreToolUse entry at all; doctor agrees`, () => {
+    test(`knob off, dispatch ${mode}: only the audit hook's PreToolUse entry; doctor agrees`, () => {
       const {env, root} = repo({dispatch, successor: false});
       install(root, env);
-      expect(preToolUse(root)).toBeUndefined();
-      expect(doctor(root, env)).toEqual(CLEAN);
-    });
-
-    test(`knob turned off, dispatch ${mode}: install takes the exact entry back and says why`, () => {
-      const {env, root} = repo({dispatch, successor: true});
-      install(root, env);
-      expect(preToolUse(root)).toBeDefined();
-      writeFileSync(
-        join(root, 'justin-sdk.config.json'),
-        JSON.stringify({
-          componentConfig: {thread: {handoff: {successor: false}}},
-          components: ['thread-hooks-setup'],
-          ...(dispatch ? {} : {hooks: {dispatch: false}}),
-        }),
-      );
-      const written = dispatch
-        ? dispatchCommand('PreToolUse')
-        : THREAD_GUARD_HOOK_COMMAND;
-      expect(doctor(root, env).extra).toEqual([
-        dispatch
-          ? // The quota brake (ys9t7.5.4) is the other PreToolUse handler; its
-            // knob, componentConfig.thread.quota.mode, is off here too.
-            `PreToolUse: \`${written}\` runs only thread guard, thread brake, and componentConfig.thread.handoff.successor, componentConfig.thread.quota.mode is off here`
-          : `PreToolUse: \`${written}\` is installed, but componentConfig.thread.handoff.successor is off here`,
+      expect(preToolUse(root)).toEqual([
+        dispatch ? DISPATCH_ENTRY : AUDIT_ENTRY,
       ]);
-      const lines = install(root, env);
-      expect(preToolUse(root)).toBeUndefined();
-      expect(lines.join('\n')).toContain(
-        `PreToolUse hook (${written}) — componentConfig.thread.handoff.successor is off here, so thread guard has nothing to do`,
-      );
       expect(doctor(root, env)).toEqual(CLEAN);
     });
   }
+
+  test('knob turned off, dispatch on: the dispatcher entry stays (the audit hook uses it), the guard re-reads its knob', () => {
+    const {env, root} = repo({dispatch: true, successor: true});
+    install(root, env);
+    writeFileSync(
+      join(root, 'justin-sdk.config.json'),
+      JSON.stringify({
+        componentConfig: {thread: {handoff: {successor: false}}},
+        components: ['thread-hooks-setup'],
+      }),
+    );
+    expect(doctor(root, env)).toEqual(CLEAN);
+    install(root, env);
+    expect(preToolUse(root)).toEqual([DISPATCH_ENTRY]);
+    expect(doctor(root, env)).toEqual(CLEAN);
+  });
+
+  test('knob turned off, dispatch off: install takes the exact guard entry back and says why', () => {
+    const {env, root} = repo({dispatch: false, successor: true});
+    install(root, env);
+    writeFileSync(
+      join(root, 'justin-sdk.config.json'),
+      JSON.stringify({
+        componentConfig: {thread: {handoff: {successor: false}}},
+        components: ['thread-hooks-setup'],
+        hooks: {dispatch: false},
+      }),
+    );
+    expect(doctor(root, env).extra).toEqual([
+      `PreToolUse: \`${THREAD_GUARD_HOOK_COMMAND}\` is installed, but componentConfig.thread.handoff.successor is off here`,
+    ]);
+    const lines = install(root, env);
+    expect(preToolUse(root)).toEqual([AUDIT_ENTRY]);
+    expect(lines.join('\n')).toContain(
+      `PreToolUse hook (${THREAD_GUARD_HOOK_COMMAND}) — componentConfig.thread.handoff.successor is off here, so thread guard has nothing to do`,
+    );
+    expect(doctor(root, env)).toEqual(CLEAN);
+  });
 
   test('knob on and the entry missing: doctor names it missing', () => {
     const {env, root} = repo({dispatch: true, successor: true});

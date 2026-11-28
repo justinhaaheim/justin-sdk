@@ -60,6 +60,7 @@ bun run justin-sdk thread ask "<one-line question>" --priority <0-4> [--header "
 - **Before you ask him to start, build or decide work on a bead, run `bun run justin-sdk thread holders <bead id>`** (sandbox off when the bead is in another repo). It names every session that already holds the bead and how far each got. If another session holds it, tell him that instead of asking. Run it again before you restate an older question: on 2026-11-08 a question asked him to start a session for a fix that had been merged five days earlier.
 - Give two or more options, or none. Name the one you recommend with `--recommend`.
 - `--approve` makes it a yes/no. `--do` marks something he has to do himself, such as testing on a device.
+- Add `--risky-default` when the default deletes, publishes, spends, touches a real account, or cannot be undone cheaply: no tool then restarts the session on that default. A P0 refuses it, since a P0 has no default.
 - A P0 takes no `--default`. P1–P3 require one. A P4 needs none.
 - An incomplete ask is refused with exit 2 and a one-line reason. Fix it and run it again.
 - Put every command, path and flag in backticks. Give each step its own `--context`, starting `Step N:`, never `N.`: several numbered steps in one context run together when he reads them.

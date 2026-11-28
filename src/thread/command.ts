@@ -739,12 +739,12 @@ does not block the turn.
 PRIORITY (unchanged from the status-report rule): P0 = the session stops
 without the answer, so it has NO --default; P1–P3 go on with the --default;
 P4 = FYI, no default needed. Options: none, or two or more. --do marks
-something Justin has to do; --approve a yes/no.
+something Justin has to do; --approve a yes/no. --risky-default labels the question risky-default when its default deletes, publishes, spends, touches a real account, or cannot be undone cheaply: no tool then restarts the session on that default.
 
 REFUSED (exit 2, one line): no --priority; a P0 with --default; a P1–P3
 without one; exactly one --option; --recommend naming a missing option; a
 question over 200 characters (put the detail in --context); a --header over
-12 characters.
+12 characters; --risky-default on a question with no default (a P0).
 
 Prints the bead id and the question exactly as Justin will see it.`;
 
@@ -1886,6 +1886,12 @@ export const threadCommand: CommandModule = {
               describe: 'A yes/no approval',
               type: 'boolean' as const,
             })
+            .option('risky-default', {
+              default: false,
+              describe:
+                'The --default deletes, publishes, spends, touches a real account, or cannot be undone cheaply: labels the question risky-default, so no tool restarts the session on that default. Refused on a P0, which has no default.',
+              type: 'boolean' as const,
+            })
             .option('session', {
               describe:
                 'Session id to file under (default: $CLAUDE_CODE_SESSION_ID)',
@@ -1904,6 +1910,7 @@ export const threadCommand: CommandModule = {
               priority: argv.priority ?? null,
               question: positionalWords(argv.question).join(' '),
               recommend: argv.recommend ?? null,
+              riskyDefault: argv['risky-default'] === true,
               sessionId: argv.session ?? null,
               to: argv.to ?? null,
             }),

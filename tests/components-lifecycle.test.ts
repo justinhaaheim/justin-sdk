@@ -933,7 +933,9 @@ describe('install with no hooks key writes the hook dispatcher (home-base-rtsx1.
     );
   }
 
-  test('a per-handler repo moves to the four dispatcher entries, and doctor expects them', async () => {
+  // Five since the file-access audit log (home-base-n1qy7.15.1) gave every
+  // repo a PreToolUse entry.
+  test('a per-handler repo moves to the five dispatcher entries, and doctor expects them', async () => {
     const components = [
       'time-check-setup',
       'usage-check-setup',
@@ -962,7 +964,7 @@ describe('install with no hooks key writes the hook dispatcher (home-base-rtsx1.
       }
     }
     expect(hookEntriesCheckResult(sb.path, {dryRun: DRY_OK})).toEqual({
-      message: 'per-handler: 8 SDK hook entries match what install writes',
+      message: 'per-handler: 9 SDK hook entries match what install writes',
       pass: true,
     });
 
@@ -975,7 +977,7 @@ describe('install with no hooks key writes the hook dispatcher (home-base-rtsx1.
       `with hooks.dispatch on, \`${dispatchCommand('Stop')}\` should run it`,
     );
 
-    // 3. install: the four dispatcher entries, the per-handler ones taken back.
+    // 3. install: the five dispatcher entries, the per-handler ones taken back.
     const {out, value} = await install();
     expect(value).toBe(0);
     const after = hookCommands(sb.path);
@@ -995,7 +997,7 @@ describe('install with no hooks key writes the hook dispatcher (home-base-rtsx1.
       }
     }
     expect(hookEntriesCheckResult(sb.path, {dryRun: DRY_OK})).toEqual({
-      message: 'dispatch: 4 SDK hook entries match what install writes',
+      message: 'dispatch: 5 SDK hook entries match what install writes',
       pass: true,
     });
     // install switched modes without writing the knob.

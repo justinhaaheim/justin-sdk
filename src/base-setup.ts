@@ -178,6 +178,37 @@ export function upsertRepoStateHook(registered: readonly unknown[]): {
   );
 }
 
+/** The SDK subcommand of the file-access audit hook; identifies it in any spelling. */
+const FILE_AUDIT_HOOK_SUBCOMMAND = 'file-audit hook';
+
+/**
+ * The file-access audit log's PreToolUse hook (home-base-n1qy7.15.1), on EVERY
+ * tool: no matcher. base-setup's, so every enrolled repo gets it with no `add`.
+ * The handler reads componentConfig["file-audit"].enabled at run time (D8), so
+ * the entry is written whatever the knob says. Logging only: it prints nothing
+ * and never decides.
+ */
+export const FILE_AUDIT_HOOK_COMMAND = sdkRun(FILE_AUDIT_HOOK_SUBCOMMAND);
+
+export const FILE_AUDIT_HOOK_EVENT = 'PreToolUse';
+
+/**
+ * Add the audit hook under PreToolUse with no matcher, or rewrite an older
+ * SDK-emitted spelling of it in place. A hand-edited variant is left exactly
+ * as it is (`upsertHookCommand`'s contract).
+ */
+export function upsertFileAuditHook(registered: readonly unknown[]): {
+  changed: boolean;
+  entries: unknown[];
+} {
+  return upsertHookCommand(
+    registered,
+    FILE_AUDIT_HOOK_SUBCOMMAND,
+    FILE_AUDIT_HOOK_COMMAND,
+    () => ({hooks: [{command: FILE_AUDIT_HOOK_COMMAND, type: 'command'}]}),
+  );
+}
+
 /**
  * Recognises THIS hook, in any generation of spelling, so that installing over
  * an older repo REPLACES the command rather than appending a second entry.
@@ -722,6 +753,15 @@ export function stepClaudeSettings(projectRoot: string): boolean {
     const repoState = upsertRepoStateHook(userPromptSubmit);
     if (repoState.changed) {
       hooks.UserPromptSubmit = repoState.entries;
+      modified = true;
+    }
+    // The file-access audit log (home-base-n1qy7.15.1): its own PreToolUse
+    // entry, every tool, where hooks.dispatch is off.
+    const preToolUse =
+      (hooks[FILE_AUDIT_HOOK_EVENT] as unknown[] | undefined) ?? [];
+    const fileAudit = upsertFileAuditHook(preToolUse);
+    if (fileAudit.changed) {
+      hooks[FILE_AUDIT_HOOK_EVENT] = fileAudit.entries;
       modified = true;
     }
     settings.hooks = hooks;

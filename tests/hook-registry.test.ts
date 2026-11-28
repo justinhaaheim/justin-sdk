@@ -8,7 +8,11 @@ import {describe, expect, test} from 'bun:test';
 import {readFileSync} from 'fs';
 import {join} from 'path';
 
-import {REPO_STATE_HOOK_COMMAND} from '../src/base-setup';
+import {
+  FILE_AUDIT_HOOK_COMMAND,
+  FILE_AUDIT_HOOK_EVENT,
+  REPO_STATE_HOOK_COMMAND,
+} from '../src/base-setup';
 import {
   dispatchCommand,
   DISPATCHED_EVENTS,
@@ -70,6 +74,26 @@ describe('the registry says what the installers write', () => {
       THREAD_FULL_REPORT_HOOK_COMMAND,
     );
     expect(byId('thread drafts hook').command).toBe(THREAD_DRAFTS_HOOK_COMMAND);
+    expect(byId('file-audit hook').command).toBe(FILE_AUDIT_HOOK_COMMAND);
+  });
+
+  // home-base-n1qy7.15.1: the file-access audit log is base-setup's, on
+  // PreToolUse for EVERY tool, with no knob (D8: the handler reads its own).
+  test('the file-audit hook: base-setup, PreToolUse, every tool, no knob', () => {
+    const audit = byId('file-audit hook');
+    expect(audit.component).toBe('base-setup');
+    expect(audit.events).toEqual([
+      {event: FILE_AUDIT_HOOK_EVENT, matcher: null},
+    ]);
+    expect(audit.knob).toBeNull();
+    expect(dispatchMatcher('PreToolUse')).toBeNull();
+    expect(
+      selectHandlers({
+        components: ['base-setup'],
+        event: 'PreToolUse',
+        toolName: 'mcp__server__tool',
+      }).map((h) => h.id),
+    ).toEqual(['file-audit hook']);
   });
 
   test('events and matchers', () => {
@@ -153,6 +177,7 @@ describe('dispatcher entries', () => {
     'thread start',
     'setup-env',
     'session-start',
+    'file-audit hook',
   ];
 
   test('no dispatcher command contains a handler subcommand, in either spelling', () => {

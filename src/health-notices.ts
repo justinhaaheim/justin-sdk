@@ -211,6 +211,9 @@ export const SELECT_COMMANDS = [
  * (measured 2026-09-10), so a notice can never reach it.
  */
 export const NEVER_COMMANDS = [
+  // A PreToolUse hook on every tool, and a report read as evidence
+  // (home-base-n1qy7.15.1): a notice in either is noise.
+  'file-audit',
   'forensics',
   'hook',
   'justin-loop handoff',
@@ -243,6 +246,7 @@ export const ALL_COMMANDS = [
   'config',
   'doctor',
   'eas-update',
+  'file-audit',
   'fix',
   'forensics',
   'hook',

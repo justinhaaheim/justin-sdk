@@ -30,7 +30,8 @@
  * through this file, so `thread nudge` keeps its own fast path.
  *
  * `thread brake` (the spend quota's PreToolUse brake, every tool) answers here
- * too: exactly `thread brake`, nothing after it.
+ * too: exactly `thread brake`, nothing after it. So does `file-audit hook`
+ * (the file-access audit log, every tool, home-base-n1qy7.15.1).
  *
  * Every other argv — `thread nudge --help` and `hook --help` included — goes to
  * cli-main.ts untouched, so help still prints help and does nothing else.
@@ -80,6 +81,16 @@ if (hookEvent != null) {
   process.exit(
     await runHookCommand({dryRun: argv.length === 3, event: hookEvent}),
   );
+} else if (
+  argv[0] === 'file-audit' &&
+  argv[1] === 'hook' &&
+  argv.length === 2
+) {
+  // The file-access audit log (home-base-n1qy7.15.1 D7) runs on EVERY tool
+  // call in every enrolled repo: exactly `file-audit hook` must not load the
+  // command tree. `file-audit hook --help` goes to cli-main.
+  const {runFileAuditHook} = await import('./file-audit/hook');
+  process.exit(runFileAuditHook());
 } else if (argv[0] === 'thread' && argv[1] === 'brake' && argv.length === 2) {
   // The quota brake runs on EVERY tool call where the quota is on (home-base-
   // ys9t7.5 D6): its cached path must not load the command tree.

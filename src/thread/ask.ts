@@ -55,6 +55,7 @@ import {
   QUESTION_BEAD_TYPE,
   QUESTION_MAX,
   renderAskDescription,
+  RISKY_DEFAULT_LABEL,
 } from './ask-format';
 import {priorityBadge, renderAsk} from './ask-render';
 import {nextQuestionIdLabel} from './question-id-assign';
@@ -80,10 +81,22 @@ export interface AskInput {
   priority: string | null;
   question: string | null;
   recommend: string | null;
+  /**
+   * home-base-nt6em.5.1 D4: `--risky-default`, the default deletes,
+   * publishes, spends, touches a real account or cannot be undone cheaply.
+   * Absent is false.
+   */
+  riskyDefault?: boolean;
 }
 
 export type AskValidation =
-  | {fields: AskFields; ok: true; priority: number; question: string}
+  | {
+      fields: AskFields;
+      ok: true;
+      priority: number;
+      question: string;
+      riskyDefault: boolean;
+    }
   | {ok: false; reason: string};
 
 /**
@@ -182,6 +195,17 @@ export function validateAsk(input: AskInput): AskValidation {
     );
   }
 
+  // home-base-nt6em.5.1 D4: the mark says a default is risky, so a question
+  // with no default (every P0, a P4 filed without one) has nothing to mark.
+  const riskyDefault = input.riskyDefault === true;
+  if (riskyDefault && askDefault.kind === 'none') {
+    return refuse(
+      priority === 0
+        ? '--risky-default marks a default as risky, and a P0 has no default. Drop --risky-default'
+        : `--risky-default marks a default as risky, and this P${priority} has no --default. Give one, or drop --risky-default`,
+    );
+  }
+
   let form: AskForm;
   if (input.do) form = 'do';
   else if (input.approve) form = 'approve';
@@ -200,6 +224,7 @@ export function validateAsk(input: AskInput): AskValidation {
     ok: true,
     priority,
     question,
+    riskyDefault,
   };
 }
 
@@ -429,6 +454,7 @@ export async function fileAsk(
   }
 
   const labels = [ASK_LABEL, sidLabel(session.id)];
+  if (valid.riskyDefault) labels.push(RISKY_DEFAULT_LABEL);
   if (request != null) {
     const link = toLabelFor(request.id);
     if (link.ok) {

@@ -22,8 +22,9 @@ import {sdkRun, sdkRunAtProjectRoot} from './sdk-invocation';
 
 /**
  * The events a dispatch-mode repo can carry a `hook <Event>` entry for.
- * PreToolUse joined for the session guard (home-base-mbnjv.5); its entry is
- * written only where the guard's knob is on (`knob` below).
+ * PreToolUse joined for the session guard (home-base-mbnjv.5); since the
+ * file-access audit log (home-base-n1qy7.15.1, no knob) every enrolled repo
+ * carries its entry, matching every tool.
  */
 export const DISPATCHED_EVENTS = [
   'UserPromptSubmit',
@@ -196,6 +197,16 @@ export const HOOK_HANDLERS: readonly HookHandler[] = [
       {event: 'Stop', matcher: NO_MATCHER},
     ],
     'thread.draftsScanHook',
+  ),
+  // The file-access audit log (home-base-n1qy7.15.1): EVERY tool, so its null
+  // matcher widens the PreToolUse dispatcher entry to every tool in every
+  // enrolled repo (dispatchMatcher). base-setup's, so every repo gets it. No
+  // knob here (D8): the entry is always written, and the handler reads
+  // componentConfig["file-audit"].enabled itself at run time.
+  handler(
+    'base-setup',
+    ['file-audit', 'hook'],
+    [{event: 'PreToolUse', matcher: NO_MATCHER}],
   ),
 ];
 

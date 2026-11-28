@@ -35,6 +35,7 @@ import {
   parseAsk,
   parseOptionFlag,
   renderAskDescription,
+  RISKY_DEFAULT_LABEL,
 } from '../src/thread/ask-format';
 import {renderAsk, renderAsks} from '../src/thread/ask-render';
 import {serializeMessageLine} from '../src/thread/message-log';
@@ -154,7 +155,10 @@ const VALID = {
 
 async function ask(
   w: World,
-  overrides: Partial<typeof VALID> & {to?: string | null} = {},
+  overrides: Partial<typeof VALID> & {
+    riskyDefault?: boolean;
+    to?: string | null;
+  } = {},
 ) {
   return await fileAsk({
     ...VALID,
@@ -269,6 +273,32 @@ describe('validateAsk: every refusal in the design, one line each', () => {
       expect(p0.priority).toBe(0);
       expect(p0.fields.default).toEqual({kind: 'none', why: P0_NO_DEFAULT});
     }
+  });
+
+  test('--risky-default (home-base-nt6em.5.1 D4): refused on a P0 and on a P4 with no default, kept on a question with one', () => {
+    const p0 = validateAsk({
+      ...VALID,
+      default: '',
+      priority: '0',
+      riskyDefault: true,
+    });
+    expect(p0.ok).toBe(false);
+    if (!p0.ok) {
+      expect(p0.reason).toMatch(/a P0 has no default/);
+      expect(p0.reason).not.toContain('\n');
+    }
+    const p4 = validateAsk({
+      ...VALID,
+      default: '',
+      priority: '4',
+      riskyDefault: true,
+    });
+    expect(p4.ok).toBe(false);
+    if (!p4.ok) expect(p4.reason).toMatch(/this P4 has no --default/);
+    const p2 = validateAsk({...VALID, riskyDefault: true});
+    expect(p2.ok && p2.riskyDefault).toBe(true);
+    const plain = validateAsk(VALID);
+    expect(plain.ok && plain.riskyDefault).toBe(false);
   });
 
   test('infers the form: options → pick, none → answer, --do → do, --approve → approve', () => {
@@ -587,6 +617,21 @@ describe('thread ask (real br)', () => {
     expect(printed.lines.join('\n')).toContain(
       `1. [Q100] 🟡 P2 · [Pick a/b] Export DB · **${VALID.question}** (${outcome.id})`,
     );
+  });
+
+  test('--risky-default adds the risky-default label and nothing else (home-base-nt6em.5.1 D4)', async () => {
+    const w = world();
+    const outcome = await ask(w, {riskyDefault: true});
+    expect(outcome.kind).toBe('filed');
+    if (outcome.kind !== 'filed') return;
+    expect(show(w, outcome.id).labels.sort()).toEqual([
+      'ask',
+      'qid:100',
+      RISKY_DEFAULT_LABEL,
+      `sid:${SESSION}`,
+    ]);
+    // The grammar is unchanged: the description still parses.
+    expect(parseAsk(show(w, outcome.id).description).ok).toBe(true);
   });
 
   test("links the session's ONLY in-progress request by label (the parent stays the session bead); with two, links none and says why", async () => {
@@ -1366,6 +1411,25 @@ describe('the CLI', () => {
       out: run.stdout.toString(),
     };
   }
+
+  test('thread ask --help names --risky-default, and the CLI refuses it on a P0 with exit 2 (home-base-nt6em.5.1 D4)', () => {
+    const w = world();
+    const help = cli(w, ['ask', '--help']);
+    expect(help.code).toBe(0);
+    // Collapsed: yargs wraps piped help at a width set by the checkout's path.
+    const text = help.out.replace(/\s+/g, ' ');
+    expect(text).toContain('--risky-default');
+    expect(text).toContain('no tool restarts the session on that default');
+    const refused = cli(w, [
+      'ask',
+      'Delete the old backups?',
+      '--priority',
+      '0',
+      '--risky-default',
+    ]);
+    expect(refused.code).toBe(2);
+    expect(refused.err).toContain('a P0 has no default');
+  });
 
   test('ask → answer (piped into the readline walk) → answers → note → done, end to end', () => {
     const w = world();

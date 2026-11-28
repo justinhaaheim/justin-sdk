@@ -24,6 +24,10 @@ import {COMPONENT_NAMES} from './component-registry';
 import {runDoctor} from './doctor';
 import {writeStdout} from './write-stdout';
 import {runEasUpdate} from './eas-update';
+// By reference, like signing-guard: command.ts loads each handler on demand,
+// and cli.ts answers `file-audit hook` before this tree loads
+// (home-base-n1qy7.15.1).
+import {fileAuditCommand} from './file-audit/command';
 import {runFix} from './fix';
 import {forensicsCommand} from './forensics/command';
 import {runInit} from './init';
@@ -1318,6 +1322,7 @@ void yargs(ARGV)
   .command(preCommitBeadsExportCommand)
   .command(preCommitTsCheckCommand)
   .command(signingGuardCommand)
+  .command(fileAuditCommand)
   .demandCommand(1, 'Please specify a command')
   .strict()
   // The CLI reports its OWN failures (uxwc.5 F1). Without this, yargs' default

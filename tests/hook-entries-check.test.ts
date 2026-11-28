@@ -75,7 +75,7 @@ describe('a repo exactly as install wrote it passes', () => {
     const root = project({hooks: {dispatch: false}});
     installHooks(root);
     expect(check(root)).toEqual({
-      message: 'per-handler: 8 SDK hook entries match what install writes',
+      message: 'per-handler: 9 SDK hook entries match what install writes',
       pass: true,
     });
   });
@@ -84,7 +84,7 @@ describe('a repo exactly as install wrote it passes', () => {
     const root = project({hooks: {dispatch: true}});
     installHooks(root);
     expect(check(root)).toEqual({
-      message: 'dispatch: 4 SDK hook entries match what install writes',
+      message: 'dispatch: 5 SDK hook entries match what install writes',
       pass: true,
     });
   });
@@ -111,7 +111,7 @@ describe('with no hooks key the check expects dispatch mode', () => {
     const root = project({});
     installHooks(root);
     expect(check(root)).toEqual({
-      message: 'dispatch: 4 SDK hook entries match what install writes',
+      message: 'dispatch: 5 SDK hook entries match what install writes',
       pass: true,
     });
   });
@@ -177,7 +177,7 @@ describe('a retired-spelling dispatcher entry (home-base-rtsx1.6)', () => {
       'bun run --cwd "${CLAUDE_PROJECT_DIR:-.}" justin-sdk hook Stop',
     );
     expect(check(root)).toEqual({
-      message: 'dispatch: 4 SDK hook entries match what install writes',
+      message: 'dispatch: 5 SDK hook entries match what install writes',
       pass: true,
     });
   });

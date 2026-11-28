@@ -26,6 +26,7 @@ import {join, resolve} from 'path';
 import {z} from 'zod';
 
 import {coreConfigNames} from './component-registry';
+import {FILE_AUDIT_ENABLED_DEFAULT} from './file-audit/audit';
 import {
   HEALTH_NOTICES_ENV_VAR,
   PROJECT_CONFIG_FILENAME,
@@ -225,6 +226,20 @@ export const healthNoticesSchema = z
  */
 const componentConfigSchema = z
   .looseObject({
+    // home-base-n1qy7.15.1: the file-access audit log. Read by hand by the
+    // hook (file-audit/audit.ts fileAuditEnabled), never through this schema:
+    // the hook runs on every tool call and must not load zod (D7).
+    'file-audit': z
+      .looseObject({
+        enabled: z
+          .boolean()
+          .optional()
+          .describe(
+            "Whether `justin-sdk file-audit hook` (PreToolUse, every tool, in every enrolled repo) appends a line to `$XDG_STATE_HOME/claude-file-audit/access.jsonl` for each tool call that names a path outside ~/Dev, each Bash call that runs outside the sandbox, and each payload it cannot read (home-base-n1qy7.15.1). It only logs: it never blocks, asks or changes a call. Absent or true (DEFAULT): on. false in the USER file (`~/.config/justin-sdk/config.json`) turns it off in every repo; false in a repo's justin-sdk.config.json turns it off in that repo. Read by the hook at every call, so a change applies at once; the hook entry stays installed and does nothing while it is off. `justin-sdk file-audit report` summarises the log.",
+          ),
+      })
+      .optional()
+      .describe('file-audit: the audit log of file access outside ~/Dev.'),
     // home-base-pp1vx.1.2. Plain string/number, not an enum: gate.ts checks the
     // values and falls back to type-checking every commit, because a schema
     // violation here would drop the whole file, thread knobs included.
@@ -1016,6 +1031,7 @@ export interface ResolvedHealthNoticesConfig {
  * imported rather than restated.
  */
 export const DEFAULT_COMPONENT_CONFIG = {
+  'file-audit': {enabled: FILE_AUDIT_ENABLED_DEFAULT},
   husky: {
     fullTsCheckEveryHours: FULL_TS_CHECK_EVERY_HOURS_DEFAULT,
     tsCheckInHook: TS_CHECK_IN_HOOK_DEFAULT,
