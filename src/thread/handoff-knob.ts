@@ -87,8 +87,9 @@ export interface ResolvedHandoffConfig {
   predecessor: HandoffPredecessorMode;
   predecessorSource: ThreadConfigSource;
   /**
-   * home-base-6ujwi D6, feature knob, default false. True: a mayor session's
-   * handoff block tells its successor to read his last 3 sessions' words.
+   * home-base-n1qy7.16 E1, E2, default true. True: every session's handoff
+   * block tells its successor to read his last 3 sessions' words. False is the
+   * off switch (E4).
    */
   readMessages: boolean;
   readMessagesSource: ThreadConfigSource;

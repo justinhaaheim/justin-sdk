@@ -56,6 +56,7 @@ import {
   registryChainNamer,
 } from './chain-names';
 import {backLinkOf, successorsOf} from './chain-step';
+import {HANDOFF_DEFAULTS} from './defaults';
 import {handoffDeferralMessage} from './handoff-gate';
 import {walkedSessionMarks} from './handoff-marks';
 import {
@@ -66,10 +67,7 @@ import {
   handoffNumberOf,
   mayorSuccessorSentence,
 } from './handoff-number';
-import {
-  blockGetsReadMessagesLine,
-  readMessagesLine,
-} from './handoff-read-messages';
+import {readMessagesLine} from './handoff-read-messages';
 import {readMessageLog} from './message-log';
 import {absoluteWhen, statusWords, tildeText} from './part-one';
 import {notFoundButUnresolved} from './session-answer';
@@ -849,9 +847,10 @@ export async function handoffBlock(input: {
    */
   pickupMessages?: boolean;
   /**
-   * home-base-6ujwi D6: a mayor's block tells its successor to read his last
-   * 3 sessions' words. Absent: componentConfig.thread.handoff.readMessages
-   * (default false).
+   * home-base-n1qy7.16 E1, E2: the block tells its successor to read his last
+   * 3 sessions' words, whatever the session's role. Absent:
+   * componentConfig.thread.handoff.readMessages (default true; false is the
+   * off switch, E4).
    */
   readMessages?: boolean;
   sessionBeadId: string;
@@ -870,7 +869,10 @@ export async function handoffBlock(input: {
       : null;
   const pickupMessages =
     input.pickupMessages ?? configured?.pickupMessages ?? false;
-  const readMessages = input.readMessages ?? configured?.readMessages ?? false;
+  const readMessages =
+    input.readMessages ??
+    configured?.readMessages ??
+    HANDOFF_DEFAULTS.readMessages;
   const loaded = await loadSession({
     cwd: input.cwd,
     env: input.env,
@@ -938,14 +940,9 @@ export async function handoffBlock(input: {
   const questions = openQuestions(model);
   // home-base-6n7my.2 D8: for a session started by hand from this block.
   const mayorLine = mayorSuccessorSentence(model.beads.session?.labels ?? []);
-  // home-base-6ujwi D6, home-base-eq5oy C2: off, or neither a mayor nor a
-  // conductor, nothing is added.
-  const readLine = blockGetsReadMessagesLine(
-    readMessages,
-    model.beads.session?.labels ?? [],
-  )
-    ? readMessagesLine(input.sessionBeadId)
-    : null;
+  // home-base-n1qy7.16 E2: the knob alone decides, for every session; no role
+  // label is read. Off (E4), nothing is added.
+  const readLine = readMessages ? readMessagesLine(input.sessionBeadId) : null;
   // home-base-z7o2m D7: off, nothing is added, so the block is as before.
   const messagesSection = pickupMessages
     ? await pickupSection({

@@ -346,7 +346,9 @@ export const HANDOFF_DEFAULTS = {
   permissionMode: 'auto' as HandoffPermissionMode,
   pickupMessages: false,
   predecessor: 'keep' as HandoffPredecessorMode,
-  readMessages: false,
+  // home-base-n1qy7.16 E1: on for every session in every project; false is
+  // the off switch (E4).
+  readMessages: true,
   successor: false,
   usage: {
     maxSampleAgeMinutes: 150,

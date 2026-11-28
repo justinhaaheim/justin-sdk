@@ -444,7 +444,7 @@ const componentConfigSchema = z
               .boolean()
               .optional()
               .describe(
-                "home-base-6ujwi D6. DEFAULT FALSE: the handoff block is unchanged. True: the handoff block of a mayor session (its session bead carries session-role:mayor) gets one more line in its \"To pick it up\" list, after the mayor-skill line, telling the successor to run `thread messages --chain <the handing-off session's bead> --sessions 3 --annotate` first and read all of its output: Justin's own words from his last 3 sessions, each followed by what Claude did after it. Every other session's block is unchanged.",
+                "home-base-n1qy7.16 E1 to E4. DEFAULT TRUE: the handoff block of every session, mayor, conductor or any other, gets one more line in its \"To pick it up\" list, telling the successor to run `thread messages --chain <the handing-off session's bead> --sessions 3 --annotate` first and read all of its output: Justin's own words from his last 3 sessions, each followed by what Claude did after it. The line comes after the mayor-skill line where there is one, otherwise right after the `thread request --continues` line. False is the off switch: no reading line in any block. Set it in a repo's justin-sdk.config.json for that repo, or in the user config for every repo that does not set it itself.",
               ),
             successor: z
               .boolean()

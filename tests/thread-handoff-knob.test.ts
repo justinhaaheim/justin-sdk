@@ -60,8 +60,8 @@ describe('componentConfig.thread.handoff', () => {
       pickupMessagesSource: 'default',
       predecessor: 'keep',
       predecessorSource: 'default',
-      // home-base-6ujwi D6: the reading line is off by default.
-      readMessages: false,
+      // home-base-n1qy7.16 E1: the reading line is on by default.
+      readMessages: true,
       readMessagesSource: 'default',
       successor: false,
       successorSource: 'default',
@@ -125,9 +125,22 @@ describe('componentConfig.thread.handoff', () => {
     });
   });
 
-  test('readMessages (home-base-6ujwi D6) resolves from the repo config; a non-boolean is named and ignored', () => {
-    const on = configWorld({project: handoffIn({readMessages: true})});
-    expect(resolveThreadConfig(on).handoff).toMatchObject({
+  test('readMessages (home-base-n1qy7.16 E4): false in the user or the repo config turns it off, the repo wins, and a non-boolean is named and ignored', () => {
+    const userOff = configWorld({user: handoffIn({readMessages: false})});
+    expect(resolveThreadConfig(userOff).handoff).toMatchObject({
+      readMessages: false,
+      readMessagesSource: 'user',
+    });
+    const projectOff = configWorld({project: handoffIn({readMessages: false})});
+    expect(resolveThreadConfig(projectOff).handoff).toMatchObject({
+      readMessages: false,
+      readMessagesSource: 'project',
+    });
+    const projectWins = configWorld({
+      project: handoffIn({readMessages: true}),
+      user: handoffIn({readMessages: false}),
+    });
+    expect(resolveThreadConfig(projectWins).handoff).toMatchObject({
       readMessages: true,
       readMessagesSource: 'project',
     });
@@ -136,9 +149,9 @@ describe('componentConfig.thread.handoff', () => {
       [{name: 'project', section: {readMessages: 'yes'}}],
       problems,
     );
-    expect(bad.readMessages).toBe(false);
+    expect(bad.readMessages).toBe(true);
     expect(problems.join('\n')).toContain(
-      'componentConfig.thread.handoff.readMessages in the project config is "yes"',
+      'componentConfig.thread.handoff.readMessages in the project config is "yes", which is not true or false — ignoring it and using true.',
     );
   });
 
@@ -209,7 +222,7 @@ describe('componentConfig.thread.handoff', () => {
       'handoff.maxUnattendedHandoffs': 'default 3',
       'handoff.permissionMode': 'default "auto"',
       'handoff.predecessor': 'default "keep"',
-      'handoff.readMessages': 'default false',
+      'handoff.readMessages': 'default true',
       'handoff.successor': 'default false',
       'handoff.usage': null,
       'handoff.usage.maxSampleAgeMinutes': 'default 150',
@@ -226,6 +239,15 @@ describe('componentConfig.thread.handoff', () => {
       // A description follows the last ` · `.
       expect((line ?? '').split('  ·  ').length).toBeGreaterThan(1);
     }
+    // home-base-n1qy7.16: every session, and false named as the off switch.
+    const reading = lines.find((entry) =>
+      entry
+        .trimStart()
+        .startsWith('componentConfig.thread.handoff.readMessages '),
+    );
+    expect(reading).toContain('DEFAULT TRUE');
+    expect(reading).toContain('every session, mayor, conductor or any other');
+    expect(reading).toContain('False is the off switch');
     expect(DEFAULT_COMPONENT_CONFIG.thread.handoff).toBe(HANDOFF_DEFAULTS);
   });
 });

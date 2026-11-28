@@ -1,6 +1,6 @@
 {
   "name": "@justinhaaheim/justin-sdk",
-  "version": "0.76.8",
+  "version": "0.77.0",
   "type": "module",
   "bin": {
     "justin-sdk": "./src/cli.ts",
@@ -63,6 +63,7 @@
     "./session-cost": "./src/session-cost.ts",
     "./session-glyphs": "./src/session-glyphs.ts",
     "./signing-guard": "./src/signing-guard.ts",
+    "./sweep": "./src/sweep.ts",
     "./thread-config": "./src/thread/config.ts",
     "./thread-pacing": "./src/thread/pacing.ts",
     "./thread-quota-group": "./src/thread/quota-group.ts",

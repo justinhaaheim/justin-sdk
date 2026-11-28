@@ -330,11 +330,14 @@ describe('Part 1 and the handoff block (AC 1)', () => {
     }
   });
 
-  // home-base-6ujwi.2 D6: componentConfig.thread.handoff.readMessages.
-  test("the readMessages knob adds the reading line to a mayor's block only; every other block is byte-for-byte the same", async () => {
+  // home-base-n1qy7.16: componentConfig.thread.handoff.readMessages is on by
+  // default for every session (E1, E2), in the same place as before (E3), and
+  // false is the off switch (E4). The AJ fixture's configs never set it.
+  const reading = () => {
     const title = TITLES['audio-journal-1'] ?? '';
     const beadId = beads[title] ?? '';
     const repo = repos['audio-journal-1'] ?? '';
+    const sessionId = ids[title] ?? '';
     const call = async (readMessages?: boolean) => {
       const block = await handoffBlock({
         cwd: repo,
@@ -343,100 +346,148 @@ describe('Part 1 and the handoff block (AC 1)', () => {
         now: NOW,
         readMessages,
         sessionBeadId: beadId,
-        sessionId: ids[title] ?? '',
+        sessionId,
         timeZone: TZ,
       });
       if (!block.ok) throw new Error(block.reason);
       return block.text;
     };
-    const line = `- ${readMessagesLine(beadId)}`;
-    const command = `bun run justin-sdk thread messages --chain ${beadId} --sessions 3 --annotate`;
+    return {
+      beadId,
+      call,
+      continuesLine: `- Run \`bun run justin-sdk thread request --continues ${beadId}\` to receive the handoff from a previous session.`,
+      line: `- ${readMessagesLine(beadId)}`,
+      projectConfig: join(repo, 'justin-sdk.config.json'),
+      repo,
+      sessionId,
+      userConfig: join(env.XDG_CONFIG_HOME ?? '', 'justin-sdk', 'config.json'),
+    };
+  };
 
-    // Not a mayor: the knob changes nothing.
-    const plainDefault = await call();
-    expect(await call(true)).toBe(plainDefault);
-    expect(plainDefault).not.toContain('--sessions 3');
+  /** Runs `body` with `handoff` as the file's componentConfig.thread.handoff. */
+  async function withHandoffConfig(
+    file: string,
+    handoff: Record<string, unknown>,
+    body: () => Promise<void>,
+  ): Promise<void> {
+    const before = readFileSync(file, 'utf8');
+    const config = JSON.parse(before) as {
+      componentConfig?: {thread?: Record<string, unknown>};
+    };
+    writeFileSync(
+      file,
+      JSON.stringify({
+        ...config,
+        componentConfig: {
+          ...config.componentConfig,
+          thread: {...config.componentConfig?.thread, handoff},
+        },
+      }),
+    );
+    try {
+      await body();
+    } finally {
+      writeFileSync(file, before);
+    }
+  }
 
-    const added = runBr(repo, ['label', 'add', beadId, '-l', MAYOR_ROLE_LABEL]);
+  async function withRole(
+    repo: string,
+    beadId: string,
+    label: string,
+    body: () => Promise<void>,
+  ): Promise<void> {
+    const added = runBr(repo, ['label', 'add', beadId, '-l', label]);
     if (!added.ok) throw new Error(`br label add: ${added.reason ?? '?'}`);
     try {
-      const mayorOff = await call(false);
-      const mayorOn = await call(true);
-      expect(mayorOff).toContain(MAYOR_SUCCESSOR_SENTENCE);
-      expect(mayorOff).not.toContain('--sessions 3');
-      expect(mayorOn).toContain(line);
-      expect(mayorOn).toContain(`\`${command}\``);
-      // Right after the mayor-skill line, and the only difference.
-      expect(mayorOn).toContain(`- ${MAYOR_SUCCESSOR_SENTENCE}\n${line}\n`);
-      expect(mayorOn.replace(`\n${line}`, '')).toBe(mayorOff);
-
-      // Absent from the call: the repo config decides.
-      const config = join(repo, 'justin-sdk.config.json');
-      const before = readFileSync(config, 'utf8');
-      writeFileSync(
-        config,
-        JSON.stringify({
-          ...(JSON.parse(before) as object),
-          componentConfig: {thread: {handoff: {readMessages: true}}},
-        }),
-      );
-      try {
-        expect(await call()).toBe(mayorOn);
-      } finally {
-        writeFileSync(config, before);
-      }
+      await body();
     } finally {
-      runBr(repo, ['label', 'remove', beadId, '-l', MAYOR_ROLE_LABEL]);
+      runBr(repo, ['label', 'remove', beadId, '-l', label]);
     }
+  }
+
+  test('with no readMessages in any config, an ordinary session`s block gets the reading line right after the --continues line', async () => {
+    const {beadId, call, continuesLine, line, sessionId} = reading();
+    const plainDefault = await call();
+    expect(plainDefault).toContain(line);
+    expect(plainDefault).toContain(
+      `\`bun run justin-sdk thread messages --chain ${beadId} --sessions 3 --annotate\``,
+    );
+    // The whole pick-up list, in order: the line is the second item.
+    expect(plainDefault.slice(plainDefault.indexOf('**To pick it up:**'))).toBe(
+      [
+        '**To pick it up:**',
+        continuesLine,
+        line,
+        '- Every open request and question above carries over to the new session. The note is the order to take them in, not the whole scope.',
+        `- To read the old session: \`claude --resume ${sessionId}\` or \`bun run justin-sdk thread show ${beadId}\``,
+      ].join('\n'),
+    );
+    expect(await call(true)).toBe(plainDefault);
   });
 
-  // home-base-eq5oy C2: a conductor session gets the same line, behind the
-  // same knob. A plain session still gets none (the test above).
-  test("the readMessages knob adds the reading line to a conductor's block; off, the block is the plain one", async () => {
-    const title = TITLES['audio-journal-1'] ?? '';
-    const beadId = beads[title] ?? '';
-    const repo = repos['audio-journal-1'] ?? '';
-    const call = async (readMessages: boolean) => {
-      const block = await handoffBlock({
-        cwd: repo,
-        env,
-        note: null,
-        now: NOW,
-        readMessages,
-        sessionBeadId: beadId,
-        sessionId: ids[title] ?? '',
-        timeZone: TZ,
-      });
-      if (!block.ok) throw new Error(block.reason);
-      return block.text;
-    };
-    const line = `- ${readMessagesLine(beadId)}`;
-    const plainOn = await call(true);
-    expect(plainOn).not.toContain(line);
+  test('readMessages false, passed in or in the project or user config, leaves an ordinary session`s block without the line, and nothing else changes', async () => {
+    const {call, line, projectConfig, userConfig} = reading();
+    const on = await call();
+    const off = await call(false);
+    expect(off).not.toContain('--sessions 3');
+    expect(on.replace(`\n${line}`, '')).toBe(off);
 
-    const added = runBr(repo, [
-      'label',
-      'add',
-      beadId,
-      '-l',
-      CONDUCTOR_ROLE_LABEL,
-    ]);
-    if (!added.ok) throw new Error(`br label add: ${added.reason ?? '?'}`);
-    try {
-      const conductorOff = await call(false);
-      const conductorOn = await call(true);
-      // Off: byte-for-byte the plain block. A conductor has no skill sentence.
-      expect(conductorOff).toBe(plainOn);
-      expect(conductorOff).not.toContain(MAYOR_SUCCESSOR_SENTENCE);
-      // On: the line right after the pickup command, and the only difference.
-      expect(conductorOn).toContain(line);
-      expect(conductorOn).toContain(
-        `--continues ${beadId}\` to receive the handoff from a previous session.\n${line}\n`,
+    await withHandoffConfig(projectConfig, {readMessages: false}, async () => {
+      expect(await call()).toBe(off);
+      // An argument still wins over the config.
+      expect(await call(true)).toBe(on);
+    });
+    await withHandoffConfig(userConfig, {readMessages: false}, async () => {
+      expect(await call()).toBe(off);
+      // The project layer wins over the user layer.
+      await withHandoffConfig(projectConfig, {readMessages: true}, async () => {
+        expect(await call()).toBe(on);
+      });
+    });
+  });
+
+  test("a mayor's block has the line right after the mayor-skill line by default; false gives the block without it", async () => {
+    const {beadId, call, line, projectConfig, repo} = reading();
+    await withRole(repo, beadId, MAYOR_ROLE_LABEL, async () => {
+      const mayorDefault = await call();
+      const mayorOff = await call(false);
+      expect(mayorDefault).toContain(
+        `- ${MAYOR_SUCCESSOR_SENTENCE}\n${line}\n`,
       );
-      expect(conductorOn.replace(`\n${line}`, '')).toBe(conductorOff);
-    } finally {
-      runBr(repo, ['label', 'remove', beadId, '-l', CONDUCTOR_ROLE_LABEL]);
-    }
+      expect(mayorOff).toContain(MAYOR_SUCCESSOR_SENTENCE);
+      expect(mayorOff).not.toContain('--sessions 3');
+      expect(mayorDefault.replace(`\n${line}`, '')).toBe(mayorOff);
+      await withHandoffConfig(
+        projectConfig,
+        {readMessages: false},
+        async () => {
+          expect(await call()).toBe(mayorOff);
+        },
+      );
+    });
+  });
+
+  test("a conductor's block is an ordinary session's block: the line right after the --continues line by default, none with false", async () => {
+    const {beadId, call, continuesLine, line, projectConfig, repo} = reading();
+    const plainDefault = await call();
+    const plainOff = await call(false);
+    await withRole(repo, beadId, CONDUCTOR_ROLE_LABEL, async () => {
+      const conductorDefault = await call();
+      const conductorOff = await call(false);
+      expect(conductorDefault).toContain(`${continuesLine}\n${line}\n`);
+      expect(conductorDefault).not.toContain(MAYOR_SUCCESSOR_SENTENCE);
+      // E2: the role label is not read, so the blocks are the plain ones.
+      expect(conductorDefault).toBe(plainDefault);
+      expect(conductorOff).toBe(plainOff);
+      await withHandoffConfig(
+        projectConfig,
+        {readMessages: false},
+        async () => {
+          expect(await call()).toBe(plainOff);
+        },
+      );
+    });
   });
 
   test('the handoff block names the session "[AJ] <title>", called from the HOME repo', async () => {

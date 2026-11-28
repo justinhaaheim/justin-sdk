@@ -1,16 +1,18 @@
 /**
- * The reading line in a mayor's handoff block (home-base-6ujwi D2, D6, D7, D8).
+ * The reading line in a handoff block (home-base-6ujwi D2, D8;
+ * home-base-n1qy7.16 E1 to E4).
  *
  * Justin, Q172 (2026-11-18): "Let's have this be something that is invoked
  * manually, ie via an instruction to the next mayor/conductor, rather than via
  * hooks. I just want to test this out first." So the block tells the successor
  * to run one command; nothing injects the messages.
  *
- * WHEN (D6, D7; home-base-eq5oy C2). Only when
- * componentConfig.thread.handoff.readMessages is true AND the session bead
- * carries `session-role:mayor` (the label mayorSuccessorSentence reads) or
- * `session-role:conductor` (set by `thread mark --conductor`). Every other
- * block is byte-for-byte as before.
+ * WHEN (home-base-n1qy7.16 E1, E2). Whenever
+ * componentConfig.thread.handoff.readMessages is true, which is its default:
+ * every session's block, mayor, conductor or any other. No `session-role:`
+ * label is read. False is the off switch (E4): the block then holds no reading
+ * line. This replaces home-base-6ujwi D6 and D7 and home-base-eq5oy C2, which
+ * gave the line to mayor and conductor sessions only.
  *
  * WHICH SESSIONS (D2). The command names the HANDING-OFF session's bead: a
  * successor at pickup holds no message of his yet (its first line is a
@@ -26,7 +28,6 @@
  */
 
 import {sdkRun} from '../sdk-invocation';
-import {CONDUCTOR_ROLE_LABEL, MAYOR_ROLE_LABEL} from './session-bead';
 
 /** His last this-many sessions (Option A of Q172). */
 export const READ_MESSAGES_SESSIONS = 3;
@@ -41,18 +42,4 @@ export function readMessagesCommand(sessionBeadId: string): string {
 /** The line, without its list marker. */
 export function readMessagesLine(sessionBeadId: string): string {
   return `Before anything else, run \`${readMessagesCommand(sessionBeadId)}\` and read all of its output: it is Justin's own words from his last ${READ_MESSAGES_SESSIONS} sessions, each followed by what Claude did after it. Treat them as high-signal guidance. If Claude Code saves the output to a file, read the whole file with the Read tool, in parts.`;
-}
-
-/**
- * Whether a block gets the line (D6, D7, home-base-eq5oy C2): the knob on, and
- * a mayor or a conductor session.
- */
-export function blockGetsReadMessagesLine(
-  knob: boolean,
-  labels: readonly string[],
-): boolean {
-  return (
-    knob &&
-    (labels.includes(MAYOR_ROLE_LABEL) || labels.includes(CONDUCTOR_ROLE_LABEL))
-  );
 }

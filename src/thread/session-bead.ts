@@ -94,9 +94,10 @@ export const MAYOR_ROLE_LABEL = 'session-role:mayor';
 /**
  * A conductor session (home-base-eq5oy C1), set by `thread mark --conductor`
  * from the conductor skill's Stop hook and passed on by a link as the mayor
- * label is (C3). It changes no session name (out of scope there): only the
- * handoff block's reading line reads it (C2). A session never carries both
- * roles, and the mayor wins (C4): see sessionRoleLabelsAfter.
+ * label is (C3). It changes no session name (out of scope there), and since
+ * home-base-n1qy7.16 E2 the handoff block's reading line no longer reads it:
+ * every session's block gets that line. A session never carries both roles,
+ * and the mayor wins (C4): see sessionRoleLabelsAfter.
  */
 export const CONDUCTOR_ROLE_LABEL = 'session-role:conductor';
 
